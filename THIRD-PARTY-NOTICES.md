@@ -72,11 +72,18 @@ These are named in comments and in the README as *interoperability targets*. No
 code from them is present in this repository; the file and line references exist
 so a reader can check the claims about how the two plugins interact.
 
-- **bookshelf.koplugin** — <https://github.com/AndyHazz/bookshelf.koplugin>, AGPL-3.0.
+- **[bookshelf.koplugin](https://github.com/AndyHazz/bookshelf.koplugin)**, AGPL-3.0.
   Optional home screen. `main.lua` cites `bookshelf_widget.lua` line numbers to
   explain where this plugin's touch zones attach and why they conflict with
   nothing.
-- **KOSync** (`kosync.koplugin`, in-tree in KOReader), AGPL-3.0. The quiet-sync
+- **[xtreader.koplugin](https://github.com/hhoangg/xtreader.koplugin)**, AGPL-3.0. Optional
+  book and progress sync. `kindleui_settings.lua` reads its public `statusText`
+  when it happens to be loaded, and cites its line numbers to say why that
+  string is safe to render as two lines.
+- **[readinginsights.koplugin](https://github.com/peterboda236/readinginsights.koplugin)**, GPL-3.0.
+  Optional reading dashboard. Cited by line number in `kindleui_settings.lua`
+  to explain why its menu id needs re-sorting.
+- **KOSync** ([`kosync.koplugin`](https://github.com/koreader/koreader/tree/master/plugins/kosync.koplugin), in-tree in KOReader), AGPL-3.0. The quiet-sync
   userpatch wraps two of its functions at runtime; it copies none of them, which
   is the whole point of the patch's shape.
 
@@ -86,7 +93,11 @@ so a reader can check the claims about how the two plugins interact.
 
 The Vietnamese lunar date is computed with Hồ Ngọc Đức's algorithm, itself
 derived from the astronomical formulae in Jean Meeus's *Astronomical Algorithms*.
-The algorithm is published for free use at
-<https://www.informatik.uni-leipzig.de/~duc/amlich/>. The implementation in
+The algorithm was published for free use at
+`informatik.uni-leipzig.de/~duc/amlich/`. That site is now gone; the rules
+page survives in the Internet Archive:
+<https://web.archive.org/web/20250123093939/http://www.informatik.uni-leipzig.de/~duc/amlich/calrules.html>.
+
+The implementation in
 [`kindleui.koplugin/kindleui_lunar.lua`](./kindleui.koplugin/kindleui_lunar.lua)
 is written for this project; only the method is Đức's.

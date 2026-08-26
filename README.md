@@ -121,7 +121,7 @@ it the clock simply shows the time it was drawn at, like any Kindle screensaver.
 ## The quiet-sync patch
 
 `KOSync:onReaderReady` pulls progress on the next tick when auto-sync is on
-(`kosync.koplugin/main.lua:190-194`):
+([`kosync.koplugin/main.lua:190-194`](https://github.com/koreader/koreader/blob/master/plugins/kosync.koplugin/main.lua#L190-L194)):
 
 ```lua
 self:getProgress(true, false)
@@ -146,13 +146,16 @@ radio back silently so you are usually online by the time you open a book.
 
 None of these are required; each degrades to "that feature is absent".
 
-- **bookshelf.koplugin** — the home screen. Without it, swipe-down works in the
-  reader but not on the home screen: `BookshelfWidget` is `covers_fullscreen`
-  and sits above the FileManager, so the plugin registers its touch zones
-  directly on that widget when it appears. Bookshelf leaves the top 1/8 band
-  free on purpose, so nothing is fought over.
-- **xtreader.koplugin** — the Sync disc and the account row in Settings.
-- **readinginsights.koplugin** — the Reading Insights row in Settings.
+- **[bookshelf.koplugin](https://github.com/AndyHazz/bookshelf.koplugin)** —
+  the home screen. Without it, swipe-down works in the reader but not on the
+  home screen: `BookshelfWidget` is `covers_fullscreen` and sits above the
+  FileManager, so the plugin registers its touch zones directly on that widget
+  when it appears. Bookshelf leaves the top 1/8 band free on purpose, so
+  nothing is fought over.
+- **[xtreader.koplugin](https://github.com/hhoangg/xtreader.koplugin)** —
+  the Sync disc and the account row in Settings.
+- **[readinginsights.koplugin](https://github.com/peterboda236/readinginsights.koplugin)** —
+  the Reading Insights row in Settings.
 
 ## Known limits
 
@@ -193,8 +196,10 @@ Full licence texts for everything below are in
   AGPL-3.0. The optional home screen. No code from it is present; `main.lua`
   cites its line numbers to explain where this plugin's touch zones attach and
   why the two do not fight over the same gestures.
-- **Lunar calendar** — Hồ Ngọc Đức's
-  [algorithm](https://www.informatik.uni-leipzig.de/~duc/amlich/), computed
+- **Lunar calendar** — Hồ Ngọc Đức's algorithm. His site at
+  `informatik.uni-leipzig.de/~duc/amlich/` is gone, so the reference is the
+  [archived rules page](https://web.archive.org/web/20250123093939/http://www.informatik.uni-leipzig.de/~duc/amlich/calrules.html).
+  Computed
   against **UTC+7**. The implementation is this project's; only the method is
   Đức's. The Vietnamese calendar is not the Chinese one — it resolves new moons
   and solar terms against a different timezone, and the two differ by a day
