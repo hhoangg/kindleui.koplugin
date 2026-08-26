@@ -1,0 +1,9 @@
+# The "Sponsor this project" panel on the repository page.
+#
+# Ko-fi only. GitHub Sponsors pays out through Stripe, which does not operate
+# in Vietnam, so a `github:` entry would draw a button that cannot receive
+# anything.
+#
+# Requires the "Sponsorships" checkbox under Settings -> General -> Features;
+# this file alone does not display the panel.
+ko_fi: hhoangg

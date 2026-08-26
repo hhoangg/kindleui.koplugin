@@ -1,0 +1,6 @@
+# macOS writes these into any directory it browses, and they end up on the
+# Kindle as junk files inside a folder KOReader scans for plugins.
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
