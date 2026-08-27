@@ -1,0 +1,56 @@
+name: CI
+
+# Lints and tests every push and pull request. Catches the things the
+# maintainer checks by hand before each deploy: Lua syntax, the headless test
+# suite, and valid translation files (a malformed .po would fail to compile on
+# device). Suggested by @tachibana-shin on #215, where an unescaped quote in a
+# translation slipped through.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Lua, LuaJIT and gettext
+        run: sudo apt-get update && sudo apt-get install -y lua5.4 luajit gettext
+
+      # Syntax-check under LuaJIT -- the actual KOReader runtime (5.1 dialect),
+      # so 5.2+/5.4-only syntax that would crash on device is caught here.
+      # -b compiles to bytecode (output discarded); it never executes, so the
+      # FFI cdefs that only exist inside KOReader aren't needed.
+      - name: Lua syntax check (LuaJIT)
+        run: |
+          fail=0
+          while IFS= read -r -d '' f; do
+            luajit -b "$f" /dev/null || { echo "syntax FAIL: $f"; fail=1; }
+          done < <(find . -name '*.lua' -not -path './.git/*' -not -path './.claude/*' -print0)
+          exit $fail
+
+      # The headless suite runs under standard Lua (not LuaJIT): the tests mock
+      # KOReader's modules, but a real LuaJIT would use its built-in ffi and trip
+      # over the missing KOReader C declarations. Each test exits non-zero on
+      # failure.
+      - name: Test suite (Lua)
+        run: |
+          fail=0
+          for f in tests/_test_*.lua; do
+            echo "== $f =="
+            lua5.4 "$f" || fail=1
+          done
+          exit $fail
+
+      # A malformed .po fails to compile and silently disables that locale on
+      # device (see #215). --check validates format + a few common mistakes.
+      - name: Validate translations
+        run: |
+          fail=0
+          for f in locale/*.po; do
+            echo "== $f =="
+            msgfmt --check -o /dev/null "$f" || fail=1
+          done
+          exit $fail

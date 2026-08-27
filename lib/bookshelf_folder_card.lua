@@ -1,0 +1,376 @@
+-- bookshelf_folder_card.lua
+-- The shared "cardboard folder card" primitive used by FolderStack and
+-- SeriesStack. Renders an L-shaped cardboard silhouette (small index tab
+-- on the top-left, full-width body below) sized to fit up to two lines
+-- of label text, bottom-aligned within a slot-sized dimen so it overlays
+-- the bottom portion of a book SpineWidget while the book peeks above.
+--
+-- API:
+--   FolderCard.build{ width, height, label } → folder_widget, label_widget
+--
+-- Both returned widgets are FrameContainers sized to the slot dimen.
+-- Caller composes them into its own OverlapGroup at z-order:
+--   OverlapGroup{ dimen, book_widget, folder_widget, label_widget, badge? }
+--
+-- Why a build helper rather than a wrapping widget: callers want to
+-- splat these into an existing OverlapGroup alongside other slot-sized
+-- widgets (book, count badge), and a nested OverlapGroup-in-a-widget
+-- adds layers without buying anything.
+
+local FrameContainer = require("ui/widget/container/framecontainer")
+local TextBoxWidget  = require("ui/widget/textboxwidget")
+local Widget         = require("ui/widget/widget")
+local Geom           = require("ui/geometry")
+local Size           = require("ui/size")
+local Font           = require("ui/font")
+local BFont          = require("lib/bookshelf_fonts")
+local Blitbuffer     = require("ffi/blitbuffer")
+local Screen         = require("device").screen
+local Device         = require("device")
+
+-- CardboardTextBox: TextBoxWidget subclass that pins alpha=true so its
+-- explicit bgcolor=CARDBOARD and fgcolor=COLOR_BLACK survive third-party
+-- monkey-patching. appearance.koplugin's _renderText patches gate on
+-- `not self.alpha` — alpha=true trips that escape hatch and preserves our
+-- colors when a theme is applied. alpha is a no-op for TextBoxWidget
+-- itself on this KOReader build: _renderBB derives bbtype from
+-- Screen.isColorEnabled only, and paintTo uses plain blitFrom.
+local CardboardTextBox = TextBoxWidget:extend{
+    alpha = true,
+}
+
+local FolderCard = {}
+
+-- Tab width as a fraction of card width. Tab height is derived per-render
+-- from the actual rendered label line height (half a line tall) so the
+-- tab scales with the chosen font size.
+local TAB_WIDTH_FRAC = 0.40
+
+-- Cardboard fill color. Real manilla on color panels; mid-grey on B&W
+-- e-ink (predictable dithering, matches book spine border weight).
+local CARDBOARD
+if Screen.isColorEnabled and Screen:isColorEnabled() then
+    CARDBOARD = Blitbuffer.colorFromString("#e7c9a9")
+else
+    CARDBOARD = Blitbuffer.gray(0.20)
+end
+local CARDBOARD_EDGE = Blitbuffer.COLOR_BLACK
+
+-- Drop-shadow allocation — must match SpineWidget's SHADOW_OFFSET so the
+-- book card behind the folder casts its drop shadow into the same L-strip
+-- where the folder's would be. Callers rely on this to skip a separate
+-- folder shadow layer.
+local SHADOW_OFFSET = Screen:scaleBySize(4)
+local CARD_BORDER   = Screen:scaleBySize(1)
+local CARD_RADIUS   = Screen:scaleBySize(4)
+
+-- Memoized rendered line height of a single ascii line ("Mg") at a given
+-- infofont-bold size and available width. Tab height and the two-line
+-- body budget derive from this; the result depends only on the face
+-- metrics (plus width, which can wrap very narrow slots), so one
+-- TextBoxWidget probe per (size, width) pair serves every card render.
+local _line_h_memo = {}
+
+-- FolderPolygon: paints the L-shaped cardboard silhouette (tab top-left
+-- + body below). Body bottom corners and tab top corners are rounded;
+-- the concave inside corner where tab meets body stays sharp.
+local FolderPolygon = Widget:extend{
+    width      = nil,
+    height     = nil,
+    tab_w      = nil,    -- tab width (left edge to tab's right wall)
+    tab_h      = nil,    -- tab height (top edge to body's top edge)
+    fill_color = nil,
+    edge_color = nil,
+    radius     = 0,      -- body bottom-corner radius
+    tab_radius = 0,      -- tab top-corner radius
+}
+
+function FolderPolygon:init()
+    self.dimen = Geom:new{ w = self.width, h = self.height }
+end
+
+function FolderPolygon:paintTo(bb, x, y)
+    local w     = self.width
+    local h     = self.height
+    local tw    = self.tab_w
+    local th    = self.tab_h
+    local fill  = self.fill_color
+    local edge  = self.edge_color
+    local r     = self.radius or 0
+    local tr    = self.tab_radius or 0
+    if tr > th then tr = th end
+    if tr * 2 > tw then tr = math.floor(tw / 2) end
+    local tr_sq = tr * tr
+
+    -- Use paintRectRGB32 unconditionally for the fill. paintRect strips
+    -- ColorRGB→Color8 via getColor8() before fill (blitbuffer.lua:1677),
+    -- so a manilla ColorRGB32 lands on the framebuffer as the equivalent
+    -- grayscale value — the body renders silver instead of tan.
+    -- paintRectRGB32 calls color:getColorRGB32() first, which all Color
+    -- types implement (Color8 returns the grayscale value as r=g=b), so
+    -- this works for both the cardboard fill and grayscale shadows.
+    --
+    -- Note: can't sniff `fill.r` to dispatch — Color8 is an FFI struct,
+    -- and accessing a missing field on a C struct hard-errors instead of
+    -- returning nil. Cheaper to just always go through the RGB path.
+    local function fillRect(rx, ry, rw, rh)
+        bb:paintRectRGB32(rx, ry, rw, rh, fill)
+    end
+    -- Same story for the edge — when the user picks a ColorRGB32 edge
+    -- through the Folder overlay foreground setting, the plain paintRect
+    -- would flatten it to luminance. Route every edge stroke through
+    -- paintRectRGB32 (Color8 still works because it implements
+    -- getColorRGB32 as r=g=b).
+    local function edgeRect(rx, ry, rw, rh)
+        bb:paintRectRGB32(rx, ry, rw, rh, edge)
+    end
+
+    -- Tab fill: small rectangle in the top-left, with rounded top corners
+    -- when tab_radius > 0. Bulk fillRect for the part below the corner
+    -- band, then row-by-row clipping in the band itself. Same (i+1)² arc
+    -- convention as the body bottom corners.
+    if tw > 0 and th > 0 then
+        if th > tr then
+            fillRect(x, y + tr, tw, th - tr)
+        end
+        if tr > 0 then
+            for dy = 0, tr - 1 do
+                local i      = tr - 1 - dy
+                local i_sq   = (i + 1) * (i + 1)
+                local cutoff = 0
+                while cutoff < tr and (tr - cutoff) * (tr - cutoff) + i_sq > tr_sq do
+                    cutoff = cutoff + 1
+                end
+                local row_left  = cutoff
+                local row_right = tw - cutoff
+                if row_right > row_left then
+                    fillRect(x + row_left, y + dy, row_right - row_left, 1)
+                end
+            end
+        end
+    end
+
+    -- Body: a rounded rect drawn with the SAME native primitives the book
+    -- covers use (paintRoundedRect fill + anti-aliased paintBorder), so the
+    -- bottom corners are anti-aliased and match their smoothness -- the old
+    -- hand-stepped arc rendered visibly jagged bottom corners when zoomed in.
+    -- These primitives round all FOUR corners, so the top is squared back off
+    -- afterwards: the body's top corners are square by design (top-left tucks
+    -- under the tab, top-right is a sharp convex corner). Straight edges still
+    -- route through paintRectRGB32 for colour fidelity (Color8 implements
+    -- getColorRGB32, so grayscale panels are safe too).
+    local body_top = th
+    local body_h   = h - body_top
+    if body_h > 0 then
+        -- Android RGB32 double-invert guard for the per-pixel corner AA: the
+        -- anti-aliased corner uses setPixel, which double-inverts under a
+        -- full-frame invert (#217). Same guard as SpineWidget's
+        -- _paintColorSafeBorder.
+        local suppress = Device:isAndroid() and bb.getInverse and bb:getInverse() == 1
+        if suppress then bb:setInverse(0) end
+        bb:paintRoundedRectRGB32(x, y + body_top, w, body_h, fill, r)
+        if edge then
+            bb:paintBorderRGB32(x, y + body_top, w, body_h, CARD_BORDER, edge, r, true)
+        end
+        if suppress then bb:setInverse(1) end
+        -- Square the top: overpaint the top r rows, clearing the native
+        -- rounded top corners + top edge (both fill and border) so the body
+        -- meets the tab / peeking book on a straight line.
+        if r > 0 then
+            fillRect(x, y + body_top, w, r)
+        end
+    end
+
+    if edge then
+        local b = CARD_BORDER
+        edgeRect(x, y + tr, b, th - tr)               -- tab left wall
+        edgeRect(x + tr, y, tw - 2 * tr, b)           -- tab top
+        edgeRect(x + tw - b, y + tr, b, th - tr)      -- tab right wall
+        edgeRect(x + tw, y + th, w - tw, b)           -- body top right of tab
+        -- Squared-top wall stubs: the overpaint above cleared the top r rows,
+        -- so redraw the straight left/right walls there, running unbroken into
+        -- the native rounded bottom corners. (The left stub sits under the tab.)
+        if r > 0 then
+            edgeRect(x, y + body_top, b, r)           -- body left wall (top)
+            edgeRect(x + w - b, y + body_top, b, r)   -- body right wall (top)
+        end
+        -- Tab top rounded corners: unchanged hand-rolled arc. Small and at the
+        -- top, and not part of the reported bottom-corner issue.
+        if tr > 0 then
+            for i = 0, tr - 1 do
+                local dy   = tr - 1 - i
+                local i_sq = (i + 1) * (i + 1)
+                local cutoff = 0
+                while cutoff < tr and (tr - cutoff) * (tr - cutoff) + i_sq > tr_sq do
+                    cutoff = cutoff + 1
+                end
+                edgeRect(x + cutoff, y + dy, b, b)
+                edgeRect(x + tw - cutoff - b, y + dy, b, b)
+            end
+        end
+    end
+end
+
+-- Build the folder card composition for a slot of (width, height) carrying
+-- `label`. Returns two FrameContainer widgets sized to the slot dimen
+-- (folder_positioned, label_positioned) ready for splatting into a parent
+-- OverlapGroup at the appropriate z-order.
+function FolderCard.build(opts)
+    local slot_w = opts.width
+    local slot_h = opts.height
+    local label_text = (opts.label or ""):gsub("/$", "")
+
+    -- Pull the user's Folder overlay colors, falling back to the
+    -- device-aware module defaults when either is unset. CARDBOARD itself
+    -- already resolves to manilla on color panels / dark grey on B&W, so
+    -- leaving it as the fallback preserves the per-device look exactly
+    -- for users who haven't picked anything. The require happens lazily
+    -- because bookshelf_cover_progress requires bookshelf_settings_store
+    -- and bookshelf_color, and pulling those at module load creates a
+    -- cycle with bookshelf_widget's require ordering.
+    local CoverProgress = require("lib/bookshelf_cover_progress")
+    local indicator_colors = CoverProgress.resolvedColors()
+    -- The cardboard fill (manilla on colour panels) and folder label are real
+    -- colours that should read identically in day and night mode, NOT get
+    -- flipped by KOReader's framebuffer night-mode inversion. Same trick as
+    -- the favourite star: when night mode is active and the user hasn't set
+    -- an explicit override, paint the default PRE-inverted so the framework's
+    -- refresh-time inversion (the same per-channel :invert()) lands back on
+    -- the intended colour. User-set overrides are honoured as-is, so day and
+    -- night remain independently customisable.
+    local is_night = G_reader_settings:isTrue("night_mode")
+    local function constantInNight(color)
+        if is_night then return color:invert() end
+        return color
+    end
+    local fill_color = indicator_colors.folder_bg or constantInNight(CARDBOARD)
+    -- Edge is driven by the shared Border color setting. folder_fg used
+    -- to share this slot which conflicted with the Border setting; the
+    -- folder text now owns folder_fg exclusively.
+    local edge_color = indicator_colors.border or CARDBOARD_EDGE
+    -- Label text colour is the only thing folder_fg controls now —
+    -- legibility against the fill is the typical tuning case (e.g. dark
+    -- text on a manilla fill).
+    local label_fg   = indicator_colors.folder_fg or constantInNight(Blitbuffer.COLOR_BLACK)
+
+    local card_w        = slot_w - SHADOW_OFFSET
+    -- Stack & folder label scale (issue #60): users with long Genre /
+    -- Tag / Series names that get cut off can dial the cardboard-card
+    -- font down to fit more text. Same store as the other text-size
+    -- settings; baseline 16pt matches the pre-#60 hardcoded size, so
+    -- 100% is a no-op. Lazy-require: bookshelf_settings_store sits
+    -- deep enough in the dependency tree that pulling it at module
+    -- load reintroduces the require cycle bookshelf_widget already
+    -- guards against (see CoverProgress lazy-require below).
+    local BookshelfSettings = require("lib/bookshelf_settings_store")
+    local label_scale = BookshelfSettings.read("stack_label_font_scale", 100) or 100
+    local face_size   = math.max(8, math.floor(16 * label_scale / 100))
+    local face, bold  = BFont:getFace("infofont", face_size, { bold = true })
+    local label_pad     = Size.padding.large
+    local label_w_avail = card_w - label_pad * 2
+
+    -- Single-ascii-line probe to derive actual rendered line height
+    -- (memoized per size/width). Tab height is half this; body fits up
+    -- to 2 lines.
+    local line_key = face_size .. "\1" .. label_w_avail
+    local line_h = _line_h_memo[line_key]
+    if not line_h then
+        local line_probe = TextBoxWidget:new{
+            text  = "Mg",
+            face  = face,
+            bold  = bold,
+            width = label_w_avail,
+        }
+        line_h = line_probe:getSize().h
+        line_probe:free()
+        _line_h_memo[line_key] = line_h
+    end
+
+    local body_inner_max = 2 * line_h
+    local probe = TextBoxWidget:new{
+        text  = label_text,
+        face  = face,
+        bold  = bold,
+        width = label_w_avail,
+    }
+    local content_h = probe:getSize().h
+    probe:free()
+    local fits    = content_h <= body_inner_max
+    local label_h = fits and content_h or body_inner_max
+
+    local tab_h = math.max(1, math.floor(line_h / 2))
+    local tab_w = math.floor(card_w * TAB_WIDTH_FRAC)
+
+    local card_h   = tab_h + label_pad + label_h + label_pad
+    local v_offset = slot_h - card_h - SHADOW_OFFSET
+    if v_offset < 0 then v_offset = 0 end
+
+    local folder = FolderPolygon:new{
+        width      = card_w,
+        height     = card_h,
+        tab_w      = tab_w,
+        tab_h      = tab_h,
+        fill_color = fill_color,
+        edge_color = edge_color,
+        radius     = CARD_RADIUS,
+        tab_radius = CARD_RADIUS,
+    }
+    local folder_positioned = FrameContainer:new{
+        bordersize   = 0,
+        padding      = 0,
+        padding_top  = v_offset,
+        padding_left = 0,
+        folder,
+    }
+
+    -- CardboardTextBox.alpha=true trips appearance.koplugin's _renderText
+    -- escape hatch (it gates on `not self.alpha`), so the user's chosen
+    -- fgcolor / bgcolor survive themes that otherwise repaint text in
+    -- their own palette. Passing user colors through here doesn't change
+    -- that contract — the alpha flag still governs the appearance gate.
+    local label_widget = CardboardTextBox:new{
+        text                          = label_text,
+        face                          = face,
+        bold                          = bold,
+        fgcolor                       = label_fg,
+        bgcolor                       = fill_color,
+        width                         = label_w_avail,
+        alignment                     = "left",
+        height                        = label_h,
+        height_overflow_show_ellipsis = not fits,
+    }
+    local label_positioned = FrameContainer:new{
+        bordersize   = 0,
+        padding      = 0,
+        padding_top  = v_offset + tab_h + label_pad,
+        padding_left = label_pad,
+        label_widget,
+    }
+
+    -- cover_floor: the slot-local y where FULL-WIDTH cardboard coverage
+    -- begins -- i.e. how far down a true-aspect cover IMAGE must reach so
+    -- the "peeking above the folder" zone never shows more blank
+    -- background than the cardboard already covers. This is NOT v_offset
+    -- (where the tab starts): the tab only spans the left TAB_WIDTH_FRAC
+    -- of the width, so an image reaching only the tab's own top still
+    -- leaves blank background visible (on the right, outside the tab) down
+    -- to where the full-width body actually begins.
+    --
+    -- Note this is now purely cosmetic, not a shadow/corner-safety margin:
+    -- the book card's own footprint (shadow, border, rounded corners)
+    -- stays at the SLOT's full height regardless of this value (see
+    -- SpineWidget.cover_align_top) -- an earlier version of this feature
+    -- shrunk the whole card to this floor instead, which broke the shadow
+    -- alignment with the folder and exposed the card's own rounded corner
+    -- past the folder's sharp one. Callers (bookshelf_folder_stack.lua /
+    -- bookshelf_series_stack.lua) pass this as
+    -- SpineWidget.alignTopCoverHeight's min_img_h (via min_cover_h).
+    local cover_floor = v_offset + tab_h
+    return folder_positioned, label_positioned, cover_floor
+end
+
+-- Exposed for callers that need to align other elements (e.g., a count
+-- badge) with the slot's shadow allocation.
+FolderCard.SHADOW_OFFSET = SHADOW_OFFSET
+
+return FolderCard

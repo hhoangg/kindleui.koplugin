@@ -1,9 +1,9 @@
-# The "Sponsor this project" panel on the repository page.
+# This plugin is a fork of bookshelf.koplugin by AndyHazz, whose work is the
+# larger part of it by a wide margin. Both are listed, upstream first, because
+# forking someone's project should not quietly redirect the support for it.
 #
-# Ko-fi only. GitHub Sponsors pays out through Stripe, which does not operate
-# in Vietnam, so a `github:` entry would draw a button that cannot receive
-# anything.
-#
-# Requires the "Sponsorships" checkbox under Settings -> General -> Features;
-# this file alone does not display the panel.
-ko_fi: hhoangg
+# Ko-fi only for the fork: GitHub Sponsors pays out through Stripe, which does
+# not operate in Vietnam, so a `github:` entry would draw a button that cannot
+# receive anything.
+ko_fi: andyhazz
+custom: ["https://ko-fi.com/hhoangg"]

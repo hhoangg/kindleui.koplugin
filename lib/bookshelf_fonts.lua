@@ -1,0 +1,428 @@
+-- lib/bookshelf_fonts.lua
+-- Single resolver for the fonts bookshelf renders its own UI in. In "follow"
+-- mode it delegates to KOReader's named faces (byte-identical to stock); when
+-- a Bookshelf UI font is chosen it returns that font's face.
+--
+-- IMPORTANT: KOReader's Font:getFace only resolves a font that lives in
+-- ./fonts (KOReader's bundle) or a *scanned* external dir (e.g. /mnt/us/fonts).
+-- It cannot load an arbitrary plugin-folder path. So the stored UI font is a
+-- *resolvable* font_face -- a bare filename (for our bundled fonts, which
+-- ensureInstalled copies into the scanned dir) or whatever path the font
+-- picker returns from KOReader's FontList. Icon ("symbols") and mono faces
+-- always pass through unchanged.
+
+local Font     = require("ui/font")
+local lfs      = require("libs/libkoreader-lfs")
+local Settings = require("lib/bookshelf_settings_store")
+
+local M = {}
+
+-- This module's own directory -> the plugin's bundled fonts dir. Used only as
+-- the COPY SOURCE for ensureInstalled (io.open reads it fine relative to cwd);
+-- never handed to Font:getFace, which can't resolve plugin-folder paths.
+local function module_dir()
+    local src = debug.getinfo(1, "S").source
+    src = src:sub(1, 1) == "@" and src:sub(2) or src
+    return src:match("^(.*)/lib/bookshelf_fonts%.lua$") or "."
+end
+M.PLUGIN_DIR = module_dir()
+M.FONT_DIR   = M.PLUGIN_DIR .. "/fonts"
+
+M.SETTING_KEY = "bookshelf_ui_font"     -- stores a resolvable font_face, or absent = follow
+M.SEEDED_KEY  = "bookshelf_fonts_seeded"
+M.FOLLOW      = "__follow__"            -- legacy sentinel; also treated as follow
+
+-- Bundled fonts: display name -> filenames (regular required).
+M.BUNDLED = {
+    ["Roboto Condensed"] = {
+        regular = "RobotoCondensed-Regular.ttf", bold = "RobotoCondensed-Bold.ttf",
+        italic  = "RobotoCondensed-Italic.ttf",  bolditalic = "RobotoCondensed-BoldItalic.ttf",
+    },
+    ["Inter ExtraBold"] = { regular = "Inter-ExtraBold.ttf" },
+    ["Caveat"]          = { regular = "Caveat-Regular.ttf" },
+}
+M.BUNDLED_ORDER = { "Roboto Condensed", "Inter ExtraBold", "Caveat" }
+
+-- Faces that must never be remapped (icon glyphs, monospace).
+local PASSTHROUGH = { symbols = true, scfont = true, infont = true, smallinfont = true, hpkfont = true }
+-- Text faces whose default weight is bold (KOReader maps these to NotoSans-Bold).
+local BOLD_FACES = { tfont = true, smalltfont = true, x_smalltfont = true, smallinfofontbold = true }
+
+-- Resolvable font_face id for a bundled font (its bare filename). Resolves via
+-- the scanned font dir once ensureInstalled has copied it there. Used by the
+-- fresh-install seed and the hero title/author defaults.
+function M.bundledFaceId(name, variant)
+    local b = M.BUNDLED[name]
+    if not b then return nil end
+    return b[variant or "regular"] or b.regular
+end
+
+-- The currently chosen UI font face (a resolvable font_face), or nil for follow.
+-- A stored face that the running KOReader can't actually load is treated as
+-- follow: callers pass this name straight to KOReader Buttons / TextWidgets,
+-- whose own Font:getFace would return nil and crash (issue #168 — RobotoCondensed
+-- was the seeded default but KOReader v2026.03 dropped it from its bundled fonts,
+-- and a bare-filename face resolves against KOReader's install ./fonts, not the
+-- user dir, so the bundled copy doesn't help). The load check is cached per
+-- setting value (keyed on `v`, so setUIFontFace invalidates it) to stay off the
+-- per-render hot path.
+local _ui_face_checked, _ui_face_ok
+function M.getUIFontFace()
+    local v = Settings.read(M.SETTING_KEY, nil)
+    if v == nil or v == M.FOLLOW or v == "" then return nil end
+    if _ui_face_checked ~= v then
+        _ui_face_checked = v
+        -- A size is MANDATORY here. Font:getFace with no size falls back to
+        -- self.sizemap[face], which is nil for an arbitrary UI face name, so
+        -- font.lua then does Screen:scaleBySize(nil) and crashes ("arithmetic
+        -- on px (nil)", framebuffer.lua) -- which took down every fresh install
+        -- whose seeded UI font can't load (issue #175, a regression from the
+        -- issue #168 probe). The size value itself is irrelevant to a load check.
+        _ui_face_ok = Font:getFace(v, 16) ~= nil
+    end
+    return _ui_face_ok and v or nil
+end
+function M.isFollow() return M.getUIFontFace() == nil end
+
+-- Persist the chosen UI font face. nil / FOLLOW / "" -> follow KOReader.
+function M.setUIFontFace(face)
+    if face == nil or face == M.FOLLOW or face == "" then
+        Settings.delete(M.SETTING_KEY)
+    else
+        Settings.save(M.SETTING_KEY, face)
+    end
+    Settings.flush()
+end
+
+-- Derive the bold sibling of a regular font_face ("-Regular." -> "-Bold."),
+-- mirroring KOReader's own bold-variant convention. nil if no substitution.
+local function bold_sibling(face)
+    local b, n = face:gsub("%-Regular%.", "-Bold.", 1)
+    if n > 0 then return b end
+    return nil
+end
+
+-- Derive the italic sibling: check bundled table first (explicit italic field),
+-- then fall back to the "-Regular." -> "-Italic." name convention.
+local function italic_sibling(face)
+    for _, b in pairs(M.BUNDLED) do
+        if b.regular == face and b.italic then return b.italic end
+    end
+    local it, n = face:gsub("%-Regular%.", "-Italic.", 1)
+    if n > 0 then return it end
+    return nil
+end
+
+-- ── Style variants of an arbitrary font FILE ───────────────────────────────
+--
+-- getFace below resolves bold/italic for the NAMED faces (the UI font and the
+-- bundled families). A line that carries its own font_face carries a font FILE
+-- the user picked out of the font list, and there is no naming table for those.
+--
+-- variantOf(file, want_bold, want_italic) -> a font file, or nil.
+--
+-- Two passes, because font packagers disagree about naming:
+--   1. filename conventions -- Foo-Regular -> Foo-BoldItalic, "Foo Bold
+--      Italic", FooBoldItalic, and so on;
+--   2. FontList.fontinfo metadata -- the same family name with the wanted
+--      bold/italic flags. This is what catches families whose files are named
+--      LinBiolinum_R / _RI / _RB and would never match a pattern.
+--
+-- Memoised per (file, style): the lookup walks every installed font, and a list
+-- row resolves its face on every rebuild.
+--
+-- The approach is bookends's findFontVariant, reimplemented here rather than
+-- called: bookshelf must render correctly with bookends absent, and a font
+-- style silently not applying is exactly the kind of degradation nobody
+-- reports as a bug.
+local _variant_cache = {}
+
+local function styleKey(want_bold, want_italic)
+    if want_bold and want_italic then return "bolditalic" end
+    if want_bold then return "bold" end
+    if want_italic then return "italic" end
+    return "regular"
+end
+
+function M.variantOf(file, want_bold, want_italic)
+    if type(file) ~= "string" or file == "" then return nil end
+    local style = styleKey(want_bold, want_italic)
+    if style == "regular" then return nil end
+    local key = file .. "\0" .. style
+    local hit = _variant_cache[key]
+    if hit ~= nil then
+        if hit == false then return nil end
+        return hit
+    end
+
+    local ok, FontList = pcall(require, "fontlist")
+    if not ok or not FontList then
+        _variant_cache[key] = false
+        return nil
+    end
+    local all = FontList:getFontList() or {}
+    local base = (file:match("([^/]+)$") or file):gsub("%.[^.]+$", "")
+
+    local want = {}
+    local function add(s) want[#want + 1] = s:lower() end
+    if style == "italic" then
+        if base:match("[Rr]egular") then add((base:gsub("[Rr]egular", "Italic"))) end
+        add(base .. "-Italic"); add(base .. " Italic"); add(base .. "Italic")
+    elseif style == "bold" then
+        if base:match("[Rr]egular") then add((base:gsub("[Rr]egular", "Bold"))) end
+        add(base .. "-Bold"); add(base .. " Bold"); add(base .. "Bold")
+    else
+        if base:match("[Rr]egular") then
+            add((base:gsub("[Rr]egular", "BoldItalic")))
+            add((base:gsub("[Rr]egular", "Bold Italic")))
+            add((base:gsub("[Rr]egular", "Bold-Italic")))
+        end
+        add(base .. "-BoldItalic"); add(base .. " Bold Italic")
+        add(base .. "-Bold Italic"); add(base .. "BoldItalic")
+    end
+    for _i = 1, #want do
+        for _j = 1, #all do
+            local n = (all[_j]:match("([^/]+)$") or ""):gsub("%.[^.]+$", "")
+            if n:lower() == want[_i] then
+                _variant_cache[key] = all[_j]
+                return all[_j]
+            end
+        end
+    end
+
+    -- Metadata pass.
+    local info = FontList.fontinfo and FontList.fontinfo[file]
+    local base_name = info and info[1] and info[1].name
+    if base_name then
+        local wb = (style == "bold" or style == "bolditalic")
+        local wi = (style == "italic" or style == "bolditalic")
+        for f, arr in pairs(FontList.fontinfo) do
+            local i1 = arr and arr[1]
+            if i1 and i1.name == base_name and f ~= file
+                    and (i1.bold == wb) and (i1.italic == wi) then
+                _variant_cache[key] = f
+                return f
+            end
+        end
+    end
+
+    _variant_cache[key] = false
+    return nil
+end
+
+-- getFace(face_name, size, opts) -> face, bold
+--   opts.bold: whether the caller wanted bold for this text.
+-- Returns the face AND the bold flag the widget should use (false when a real
+-- bold file is returned, so the widget doesn't faux-bold on top). Always falls
+-- back to the native named face if a chosen font can't be resolved -- so a
+-- missing/unresolvable font degrades to "follow", never a nil-face crash.
+function M:getFace(face_name, size, opts)
+    opts = opts or {}
+    if PASSTHROUGH[face_name] then
+        return Font:getFace(face_name, size), opts.bold
+    end
+    local ui = M.getUIFontFace()
+    if not ui then
+        if opts.italic then
+            -- Derive italic sibling from the native face's realname so follow
+            -- mode uses e.g. NotoSans-Italic rather than hardcoding it.
+            local reg = Font:getFace(face_name, size)
+            if reg and reg.realname then
+                -- Bold AND italic: a real BoldItalic file first. Falling
+                -- straight through to the plain italic sibling returned the
+                -- slant and silently dropped the weight, so "Bold italic" and
+                -- "Italic" rendered identically.
+                if opts.bold then
+                    local bi = M.variantOf(reg.realname, true, true)
+                    if bi then
+                        local bif = Font:getFace(bi, size)
+                        if bif then return bif, false end
+                    end
+                end
+                local sib = italic_sibling(reg.realname)
+                if sib then
+                    local itf = Font:getFace(sib, size)
+                    -- opts.bold, not false: with no BoldItalic on disk the
+                    -- italic file gets faux-bolded, which is the closest thing
+                    -- available and keeps the two states distinguishable.
+                    if itf then return itf, opts.bold or false end
+                end
+            end
+        end
+        return Font:getFace(face_name, size), opts.bold       -- follow: identical to stock
+    end
+    local want_bold = opts.bold or BOLD_FACES[face_name] or false
+    if want_bold then
+        -- Same ordering as the follow branch: a real BoldItalic beats a bold
+        -- file that has thrown the slant away.
+        if opts.italic then
+            local bi = M.variantOf(ui, true, true)
+            if bi then
+                local bif = Font:getFace(bi, size)
+                if bif then return bif, false end
+            end
+            local isib = italic_sibling(ui)
+            if isib then
+                local itf = Font:getFace(isib, size)
+                if itf then return itf, true end              -- faux-bold the italic
+            end
+        end
+        local sib = bold_sibling(ui)
+        if sib then
+            local bf = Font:getFace(sib, size)
+            if bf then return bf, false end                   -- real bold file, no faux bold
+        end
+        local rf = Font:getFace(ui, size)
+        if rf then return rf, true end                        -- no bold file: faux-bold the regular
+    elseif opts.italic then
+        local sib = italic_sibling(ui)
+        if sib then
+            local itf = Font:getFace(sib, size)
+            if itf then return itf, false end
+        end
+        local rf = Font:getFace(ui, size)
+        if rf then return rf, false end                       -- no italic variant: use regular
+    else
+        local rf = Font:getFace(ui, size)
+        if rf then return rf, false end
+    end
+    return Font:getFace(face_name, size), opts.bold           -- unresolvable -> native (no crash)
+end
+
+-- Writable, KOReader-scanned user font dir per platform.
+local function user_font_dir()
+    local ok_dev, Device = pcall(require, "device")
+    if ok_dev and Device then
+        if Device:isKindle()  then return "/mnt/us/fonts" end
+        if Device:isAndroid() and Device.home_dir then return Device.home_dir .. "/fonts" end
+    end
+    local ok_ds, DataStorage = pcall(require, "datastorage")
+    if ok_ds and DataStorage then return DataStorage:getDataDir() .. "/fonts" end
+    return nil
+end
+
+local function copy_file(src, dst)
+    local fi = io.open(src, "rb"); if not fi then return false end
+    local data = fi:read("*a"); fi:close()
+    local fo = io.open(dst, "wb"); if not fo then return false end
+    fo:write(data); fo:close()
+    return true
+end
+
+-- Best-effort: copy any not-yet-present bundled files into the scanned user
+-- font dir. This is what makes the bundled fonts resolvable by Font:getFace
+-- (and selectable in the font picker). Never raises; returns the count copied.
+local _ensure_installed_done = false
+function M.ensureInstalled()
+    -- Once per session: plugin init re-runs on every FM/Reader
+    -- re-instantiation (each book open and close); the bundled files
+    -- can't go missing mid-session, so re-statting every variant on
+    -- each init is wasted flash I/O. A restart re-checks naturally.
+    if _ensure_installed_done then return 0 end
+    local dir = user_font_dir()
+    if not dir then return 0 end
+    _ensure_installed_done = true
+    if lfs.attributes(dir, "mode") == nil then pcall(lfs.mkdir, dir) end
+    local copied = 0
+    for _, name in ipairs(M.BUNDLED_ORDER) do
+        local b = M.BUNDLED[name]
+        for _, variant in ipairs({ "regular", "bold", "italic", "bolditalic" }) do
+            local file = b[variant]
+            if file then
+                local dst = dir .. "/" .. file
+                if lfs.attributes(dst, "mode") == nil then
+                    local ok, done = pcall(copy_file, M.FONT_DIR .. "/" .. file, dst)
+                    if ok and done then copied = copied + 1 end
+                end
+            end
+        end
+    end
+    return copied
+end
+
+-- One-time: on a genuinely fresh install (no settings file existed at load),
+-- seed the fresh-install defaults -- Bookshelf UI font (Roboto Condensed),
+-- the hero/detail layout, and author-name formatting (First Last). Existing
+-- users (settings file present) are left untouched. Runs once; guarded by
+-- SEEDED_KEY.
+function M.maybeSeedFreshInstall()
+    if Settings.read(M.SEEDED_KEY, false) then return end
+    if not Settings.wasPresent() then            -- no prior settings file => fresh install
+        Settings.save(M.SETTING_KEY, M.bundledFaceId("Roboto Condensed"))
+        Settings.save("author_format", "first_last")
+        -- Flexible chip widths by default: chips size to their label instead of
+        -- equal-share, so the bar (now carrying the micro-modules chip) doesn't
+        -- crowd and truncate names (issue #176). New installs only -- existing
+        -- users keep whatever they have (chip_flex_widths unset = equal-share).
+        Settings.save("chip_flex_widths", true)
+        -- Micro-modules default to the full-screen footer button rather than the
+        -- in-hero chip: it declutters the chip bar (#176) and reads better. New
+        -- installs only -- existing users keep their placement (unset -> "hero"
+        -- via Store.microPlacement, the prior behaviour).
+        Settings.save("micro_modules_placement", "fullscreen")
+        local ok, Regions = pcall(require, "lib/bookshelf_hero_regions")
+        if ok and Regions and Regions.applyFreshInstallDefaults then
+            Regions.applyFreshInstallDefaults()
+        end
+    end
+    Settings.save(M.SEEDED_KEY, true)
+    Settings.flush()
+end
+
+-- Resolve a font display name (e.g. "BIZ UDPMincho") to a file path that
+-- Font:getFace can load. The hero's [font=NAME] tag (issue #144) carries a
+-- display name, but the renderer needs a file. Returns the input unchanged if
+-- it already looks like a path, or nil if no installed font matches. Memoised
+-- (including misses) since the FontList fallback iterates every installed font.
+-- Ported from bookends' resolveFontNameToFile.
+local _font_name_cache = {}
+function M.resolveFontNameToFile(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    local hit = _font_name_cache[name]
+    if hit ~= nil then return hit or nil end
+    local result
+    if name:find("/") or name:match("%.[tT][tT][fFcC]$") or name:match("%.[oO][tT][fFcC]$") then
+        result = name  -- already a file path
+    else
+        -- Preferred: ask CRE (matches stock KOReader's font resolution, picks
+        -- the regular variant).
+        local ok_cre, cre = pcall(function()
+            return require("document/credocument"):engineInit()
+        end)
+        if ok_cre and cre and cre.getFontFaceFilenameAndFaceIndex then
+            local ok_call, file = pcall(cre.getFontFaceFilenameAndFaceIndex, name)
+            if ok_call and type(file) == "string" and file ~= "" then result = file end
+        end
+        if not result then
+            -- Fallback: rank-based FontList iteration (most-regular variant wins).
+            local ok_fl, FontList = pcall(require, "fontlist")
+            if ok_fl and FontList then
+                local best_file, best_rank = nil, math.huge
+                for file, info in pairs(FontList.fontinfo or {}) do
+                    if info and info[1] and info[1].name == name then
+                        local fi = info[1]
+                        local rank = 0
+                        if fi.bold then rank = rank + 2 end
+                        if fi.italic then rank = rank + 2 end
+                        local lbase = (file:match("([^/]+)$") or ""):lower()
+                        if lbase:find("regular") then
+                            rank = rank - 1
+                        elseif lbase:find("bold") or lbase:find("italic") or lbase:find("oblique") then
+                            rank = rank + 2
+                        elseif lbase:find("light") or lbase:find("thin") or lbase:find("heavy")
+                            or lbase:find("black") or lbase:find("medium") or lbase:find("semibold")
+                            or lbase:find("extrabold") or lbase:find("book") then
+                            rank = rank + 1
+                        end
+                        if rank < best_rank then best_file, best_rank = file, rank end
+                    end
+                end
+                result = best_file
+            end
+        end
+    end
+    _font_name_cache[name] = result or false
+    return result
+end
+
+return M

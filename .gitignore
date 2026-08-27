@@ -1,6 +1,18 @@
-# macOS writes these into any directory it browses, and they end up on the
-# Kindle as junk files inside a folder KOReader scans for plugins.
+docs/
+.superpowers/
+.claude/
+CLAUDE.md
+*.swp
+*.swo
+*~
 .DS_Store
+__MACOSX/
+luac.out
+_branch_marker.txt
+
+assets/bookshelf-social.*
+
+# --- kindleui ---
 ._*
 .Spotlight-V100
 .Trashes
