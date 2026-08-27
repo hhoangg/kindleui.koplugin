@@ -740,8 +740,24 @@ end
 
 --- Rebuild after a toggle so the captions match the new state.
 function ControlCentre:rebuild()
+    -- Refresh the UNION of where the panel WAS and where it now is.
+    --
+    -- The panel's height is not fixed: it grows when a background job puts a
+    -- card in it and shrinks when that card goes away. `self.dimen` after
+    -- update() is the NEW rectangle, so dirtying only that leaves whatever the
+    -- taller panel had painted below it on screen -- on the device, a stranded
+    -- card outline and a second chevron sitting under the real one, with the
+    -- page showing through between them.
+    --
+    -- Both rectangles start at the top-left and span the full width, so the
+    -- union is simply the taller of the two.
+    local prev_h = self.dimen and self.dimen.h or 0
     self:update()
-    UIManager:setDirty(self, "ui", self.dimen)
+    local region = self.dimen
+    if prev_h > region.h then
+        region = Geom:new{ x = region.x, y = region.y, w = region.w, h = prev_h }
+    end
+    UIManager:setDirty(self, "ui", region)
 end
 
 function ControlCentre:paintTo(bb, x, y)
