@@ -82,8 +82,7 @@ maps to "circuit-board", not a cog. This symbols.ttf predates Nerd Fonts v3, so
 the whole U+F0001..U+F1AF0 MDI plane is absent. FontAwesome's refresh and cog
 are used instead.
 ]]
-local GLYPH_AIRPLANE  = "\u{E71C}"
-local GLYPH_BLUETOOTH = "\u{F293}"
+local GLYPH_WIFI      = "\u{F1EB}"
 local GLYPH_DARKMODE  = "\u{E7DC}"
 local GLYPH_SYNC      = "\u{F021}"
 local GLYPH_SETTINGS  = "\u{F013}"
@@ -94,7 +93,6 @@ local GLYPH_CHEVRON_UP = "\u{F077}"
 local REF_SIDE_MARGIN  = 56
 local REF_PAD_TOP      = 48
 local REF_PAD_BOTTOM   = 28
-local REF_DEVICE_H     = 56   -- device name, large bold
 local REF_CLOCK_H      = 36   -- "04:32 PM • Aug 25, 2026"
 local REF_BATTERY_H    = 40
 local REF_DISC_D       = 104
@@ -271,7 +269,6 @@ function ControlCentre:init()
         font = font or "cfont"
         return Font:getFace(font, TextWidget:getFontSizeToFitHeight(font, Layout.y(ref_h), 0))
     end
-    self.face_device = faceFor(REF_DEVICE_H, "tfont")     -- tfont is NotoSans-Bold (font.lua:44)
     self.face_clock = faceFor(REF_CLOCK_H)
     self.face_battery = faceFor(REF_BATTERY_H)
     self.face_disc_glyph = faceFor(REF_DISC_GLYPH_H)
@@ -310,10 +307,59 @@ end
 -- Layout
 --------------------------------------------------------------------------------
 
-function ControlCentre:_buildHeader()
-    local name = G_reader_settings:readSetting("device_name") or Device.model or _("Kindle")
-    local name_widget = TextWidget:new{ text = name, face = self.face_device, padding = 0 }
+--- Ignore everything until the stroke that opened us has ended.
+--
+-- The top-band zone claims `pan` as well as `swipe`, because KOReader reports a
+-- slow drag as a pan and registering only `swipe` loses the gesture for anyone
+-- who does not flick. The cost is that a pan opens the panel with the finger
+-- STILL DOWN, and every further event of that one stroke lands on the panel
+-- that just appeared -- so a swipe carried a little too far arrives at the
+-- brightness slider, which listens for `pan` (kindleui_slider.lua:132), and
+-- drags it.
+--
+-- Nothing is inferred from position or timing here. The stroke has an end and
+-- KOReader reports it (`pan_release`, gesturedetector.lua:18), so that is what
+-- is waited for.
+function ControlCentre:armAfterOpen()
+    self._armed = true
+    -- If the release never arrives -- the finger leaves past the screen edge,
+    -- the event is dropped, the detector reclassifies mid-stroke -- the panel
+    -- would stay inert forever. An unusable control centre is a far worse
+    -- outcome than the stray drag this exists to prevent, so the wait is
+    -- bounded and the bound is generous enough not to cut a slow drag short.
+    UIManager:scheduleIn(2, function()
+        if self._armed then
+            logger.dbg("kindleui: control centre never saw its pan release, arming anyway")
+            self._armed = false
+        end
+    end)
+end
 
+--- Gesture events go to children BEFORE the parent gets a look
+-- (widgetcontainer.lua:100-107), so a slider would consume the stroke long
+-- before any handler of ours ran. Intercepting here, above the propagation, is
+-- the only place that can hold the whole panel back at once.
+function ControlCentre:handleEvent(event)
+    if self._armed and event and event.handler == "onGesture" then
+        local ges = event.args and event.args[1]
+        local kind = type(ges) == "table" and ges.ges or nil
+        if kind == "pan_release" or kind == "swipe" or kind == "hold_release" then
+            self._armed = false
+        end
+        -- Swallowed either way: the releasing event is the last of the opening
+        -- stroke and is not an interaction the user meant to make.
+        return true
+    end
+    return InputContainer.handleEvent(self, event)
+end
+
+function ControlCentre:_buildHeader()
+    -- No device name here, unlike Kindle's own panel. Kindle shows the name you
+    -- registered the device under, which lives behind lipc's
+    -- `com.lab126.amazon GetDeviceName` -- a source that is not running while
+    -- KOReader has the framework stopped, so it cannot be read. What was left to
+    -- print was `Device.model`, i.e. the literal string "KindlePaperWhite5":
+    -- true, useless, and not what the row is for.
     local powerd = Device.powerd
     local batt_text = string.format("%d%%", powerd:getCapacity())
     if powerd:isCharging() then
@@ -329,17 +375,6 @@ function ControlCentre:_buildHeader()
         batt_glyph,
     }
 
-    local spacer = self.inner_w - name_widget:getSize().w - right:getSize().w
-    if spacer < Size.span.horizontal_default then
-        spacer = Size.span.horizontal_default
-    end
-    local line1 = HorizontalGroup:new{
-        align = "center",
-        name_widget,
-        HorizontalSpan:new{ width = spacer },
-        right,
-    }
-
     -- e.g. "04:32 PM • Aug 25, 2026". secondsToHour honours the user's
     -- twelve_hour_clock setting (datetime.lua:238); the date is assembled from
     -- datetime's own short month names so it follows the UI language.
@@ -348,13 +383,18 @@ function ControlCentre:_buildHeader()
     local month = datetime.shortMonthTranslation[os.date("%b", now)] or os.date("%b", now)
     local date_text = string.format("%s \u{2022} %s %s, %s",
         clock, month, os.date("%d", now), os.date("%Y", now))
-    local line2 = TextWidget:new{ text = date_text, face = self.face_clock, padding = 0 }
+    local date_widget = TextWidget:new{ text = date_text, face = self.face_clock, padding = 0 }
 
-    return VerticalGroup:new{
-        align = "left",
-        line1,
-        VerticalSpan:new{ width = Layout.y(8) },
-        line2,
+    -- One row: time and date left, battery right -- the same split Kindle's own
+    -- titleBar uses. With the device name gone there is nothing left for a
+    -- second line, and a lone battery above a lone date reads as a mistake.
+    local spacer = math.max(Size.span.horizontal_default,
+        self.inner_w - date_widget:getSize().w - right:getSize().w)
+    return HorizontalGroup:new{
+        align = "center",
+        date_widget,
+        HorizontalSpan:new{ width = spacer },
+        right,
     }
 end
 
@@ -388,51 +428,36 @@ function ControlCentre:_discRow(specs, cell_w)
 end
 
 function ControlCentre:_buildToggles()
-    local cell_w = math.floor(self.inner_w / 3)
+    -- Four discs in one row, so a quarter of the inner width each.
+    local cell_w = math.floor(self.inner_w / 4)
 
-    -- Airplane mode. KOReader has no such concept, so it is expressed as the
-    -- Wi-Fi radio inverted: airplane ON means the radio is OFF. Hence the label
-    -- reads "On" precisely when NetworkMgr:isWifiOn() is false, and tapping it
-    -- turns the radio the *other* way round from what the caption says.
+    -- Wi-Fi, stated plainly.
+    --
+    -- This slot used to be an "Airplane" disc, which was the same radio with its
+    -- caption inverted: airplane On meant the radio Off. That reads fine on a
+    -- phone, where airplane mode covers several radios at once, and badly here,
+    -- where KOReader has exactly one and no notion of airplane mode at all --
+    -- the toggle underneath was always NetworkMgr's. So the disc now says what
+    -- it does: On when the radio is on, and tapping it turns that radio the way
+    -- the caption implies rather than the opposite way.
+    --
     -- NetworkMgr:isWifiOn is manager.lua:182, the toggles are 433 and 447.
     local wifi_on = NetworkMgr:isWifiOn() and true or false
-    local airplane_on = not wifi_on
     local no_radio_control = not Device:hasWifiToggle()
 
-    local specs_top = {
+    local specs = {
         {
-            glyph = GLYPH_AIRPLANE,
-            label = airplane_on and _("On") or _("Off"),
-            active = airplane_on,
+            glyph = GLYPH_WIFI,
+            label = wifi_on and _("On") or _("Off"),
+            active = wifi_on,
             disabled = no_radio_control,
             on_tap = function()
-                if airplane_on then
-                    NetworkMgr:toggleWifiOn(nil, false, true) -- leaving airplane mode
-                else
+                if wifi_on then
                     NetworkMgr:toggleWifiOff(nil, true)
+                else
+                    NetworkMgr:toggleWifiOn(nil, false, true)
                 end
                 self:rebuild()
-            end,
-        },
-        {
-            -- Kindle's own panel has Bluetooth here. The hardware supports it --
-            -- Amazon drives Audible and VoiceView over it -- but KOReader does
-            -- not: a search of frontend/ and plugins/ finds the word zero times,
-            -- on any platform. Reaching it would mean going around KOReader to
-            -- Amazon's lipc daemons directly, the way powerd.lua:139 sets
-            -- flIntensity, against property names that are undocumented and free
-            -- to change between firmware releases.
-            --
-            -- So the slot holds something that works instead. Rotation is not a
-            -- toggle, so its caption is a name rather than an On/Off state --
-            -- the same rule the Sync and All Settings discs follow.
-            icon = "rotation.90CW",
-            label = _("Rotate"),
-            active = false,
-            on_tap = function()
-                -- dispatcher.lua:110 registers this as `toggle_rotation`.
-                self:_dispatch(Event:new("SwapRotation"))
-                UIManager:close(self)
             end,
         },
         {
@@ -447,17 +472,14 @@ function ControlCentre:_buildToggles()
                 self:rebuild()
             end,
         },
-    }
-
-    local specs_bottom = {
         {
             glyph = GLYPH_SYNC,
             label = _("Sync"),
             active = false,
             on_tap = function()
-                -- "XtreaderSync" is registered by a sibling plugin in this repo,
-                -- not by KOReader. If that plugin is absent nothing consumes the
-                -- event and the tap is a no-op, which is the intended fallback.
+                -- "XtreaderSync" is registered by a sibling plugin, not by
+                -- KOReader. If that plugin is absent nothing consumes the event
+                -- and the tap is a no-op, which is the intended fallback.
                 self:_dispatch(Event:new("XtreaderSync"))
             end,
         },
@@ -479,7 +501,7 @@ function ControlCentre:_buildToggles()
         },
     }
 
-    return self:_discRow(specs_top, cell_w), self:_discRow(specs_bottom, cell_w)
+    return self:_discRow(specs, cell_w)
 end
 
 --- Human-readable name of the AutoWarmth plugin's current mode.
@@ -594,16 +616,12 @@ function ControlCentre:update()
     end
 
     local section_gap = Layout.y(REF_SECTION_GAP)
-    local row_gap = Layout.y(REF_ROW_GAP)
 
     local items = {}
     table.insert(items, self:_buildHeader())
     table.insert(items, VerticalSpan:new{ width = section_gap })
 
-    local row_top, row_bottom = self:_buildToggles()
-    table.insert(items, row_top)
-    table.insert(items, VerticalSpan:new{ width = row_gap })
-    table.insert(items, row_bottom)
+    table.insert(items, self:_buildToggles())
     table.insert(items, VerticalSpan:new{ width = section_gap })
 
     table.insert(items, LineWidget:new{

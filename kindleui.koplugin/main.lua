@@ -72,6 +72,7 @@ local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local _ = require("gettext")
+local T = require("ffi/util").template
 
 local KindleUI = WidgetContainer:extend({
     name = "kindleui",
@@ -243,7 +244,11 @@ function KindleUI:_controlCentreZones(prefix, overrides)
         -- edge" mean what it says.
         logger.dbg("kindleui: top-band swipe, direction =", tostring(ges.direction))
         if ges.direction ~= "south" then return false end
-        return self:onShowKindleControlCentre()
+        -- A `swipe` is terminal: the finger has already lifted by the time it is
+        -- reported. A `pan` is not -- the finger is still down and will keep
+        -- producing events, which is why the panel has to be told which of the
+        -- two opened it.
+        return self:onShowKindleControlCentre(ges.ges == "pan")
     end
     local zones = {}
     for _, ges in ipairs({ "swipe", "pan" }) do
@@ -507,9 +512,17 @@ function KindleUI:_showScreen(key, module_name)
     return true
 end
 
-function KindleUI:onShowKindleControlCentre()
+function KindleUI:onShowKindleControlCentre(finger_still_down)
     if not self:_showScreen("control_centre", "kindleui_controlcentre") then
         return false
+    end
+    -- Opened mid-stroke: hold the panel inert until the finger lifts. Without
+    -- this, a drag long enough to reach the sliders keeps feeding them `pan`
+    -- events from the same stroke that opened the panel, and the brightness
+    -- moves because the user swiped a bit far.
+    local panel = self._screens and self._screens.control_centre
+    if finger_still_down and panel and panel.armAfterOpen then
+        panel:armAfterOpen()
     end
     -- Upstream cancels any pan-scroll the swipe started; without this the page
     -- creeps under the panel (readermenu.lua:486 does the same).
@@ -634,8 +647,18 @@ function KindleUI:showLockOverlay()
         logger.warn("kindleui: lock screen overlay failed to load:", tostring(LockScreen))
         return
     end
+    -- Report the failure. Swallowing it silently -- which this did -- meant a
+    -- lock screen that had stopped drawing entirely left NOTHING in the log to
+    -- say why, and the fault took a round trip through the device to find.
     local built, widget = pcall(function() return LockScreen:new({}) end)
-    if not built or not widget or not widget.dimen then return end
+    if not built then
+        logger.warn("kindleui: lock screen overlay failed to build:", tostring(widget))
+        return
+    end
+    if not widget or not widget.dimen then
+        logger.warn("kindleui: lock screen overlay built with no dimen")
+        return
+    end
     self._lock_widget = widget
     UIManager:show(widget, "ui", widget.dimen)
     self:armLockWake()
@@ -740,6 +763,20 @@ function KindleUI:lockScreenMenu()
             end,
         }
     end
+    -- The nine cells, named the way the settings list reads them rather than as
+    -- a grid: nobody scanning a menu thinks in row-major order.
+    local function place(value, label)
+        return {
+            text = label,
+            checked_func = function()
+                return (G_reader_settings:readSetting("kindleui_lock_pos") or "bottom-left") == value
+            end,
+            radio = true,
+            callback = function()
+                G_reader_settings:saveSetting("kindleui_lock_pos", value)
+            end,
+        }
+    end
     local function every(minutes, label)
         return {
             text = label,
@@ -762,6 +799,21 @@ function KindleUI:lockScreenMenu()
         toggle("lock_lunar", _("Lunar date"),
                _("Vietnamese lunar calendar, computed against UTC+7. It differs from the Chinese one by a day several times a year.")),
         toggle("lock_quote", _("Quote of the day")),
+        {
+            text = _("Position"),
+            help_text = _("Which ninth of the screen the clock, date and quote sit in. Bottom-left is what Kindle does."),
+            sub_item_table = {
+                place("top-left",      _("Top left")),
+                place("top-center",    _("Top centre")),
+                place("top-right",     _("Top right")),
+                place("middle-left",   _("Middle left")),
+                place("middle-center", _("Middle centre")),
+                place("middle-right",  _("Middle right")),
+                place("bottom-left",   _("Bottom left")),
+                place("bottom-center", _("Bottom centre")),
+                place("bottom-right",  _("Bottom right")),
+            },
+        },
         {
             text = _("Text colour"),
             separator = true,
