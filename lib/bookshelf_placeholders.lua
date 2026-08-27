@@ -178,6 +178,59 @@ function Placeholders.buildRecord(shape)
     }
 end
 
+-- ── Folders ─────────────────────────────────────────────────────────────────
+--
+-- Books alone are not enough, and the gap is total rather than cosmetic.
+--
+-- `getAll` drops any directory with no book FILE under it: it asks
+-- `findFirstBookIn` and `folderHasBooks`, both of which walk the real
+-- filesystem. So a folder whose books are all still on the server is either
+-- empty (dropped) or does not exist here at all (never listed), and in both
+-- cases the placeholders inside it are unreachable -- there is no folder card
+-- to tap. That is precisely the state a newly paired device is in, which would
+-- have made the whole feature invisible on the one device that needs it most.
+
+local _folder_provider = nil
+
+--- Register the source of placeholder FOLDERS, or nil to remove it.
+--
+-- `fn(path)` returns an array of plain subfolder NAMES sitting directly under
+-- `path` that contain catalogue books at ANY depth -- not just directly. A
+-- folder three levels above a book still has to be listed, or the reader
+-- cannot walk down to it.
+--
+-- Names, not paths: the listing builds the path itself, and a provider that
+-- returned paths could return one that is not under `path` at all.
+function Placeholders.setFolderProvider(fn)
+    _folder_provider = (type(fn) == "function") and fn or nil
+end
+
+--- The set of placeholder subfolder names directly under `path`.
+--
+-- Returned as a SET rather than an array because both callers ask membership
+-- questions of it -- "should this on-disk folder survive the emptiness check"
+-- and "which of these have no directory on disk yet".
+function Placeholders.folderNamesFor(path)
+    if not _folder_provider or type(path) ~= "string" then return {} end
+    local ok, list = pcall(_folder_provider, path)
+    if not ok then
+        local ok_log, logger = pcall(require, "logger")
+        if ok_log then
+            logger.warn("[bookshelf] placeholder folder provider failed:", tostring(list))
+        end
+        return {}
+    end
+    if type(list) ~= "table" then return {} end
+    local set = {}
+    for _i, name in ipairs(list) do
+        if type(name) == "string" and name ~= "" and name ~= "." and name ~= ".."
+                and not name:find("/", 1, true) then
+            set[name] = true
+        end
+    end
+    return set
+end
+
 -- ── Fetching ────────────────────────────────────────────────────────────────
 --
 -- Downloading belongs to whichever plugin supplied the entry: it owns the

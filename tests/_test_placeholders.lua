@@ -159,6 +159,7 @@ end
 
 local function reset()
     Placeholders.setProvider(nil)
+    Placeholders.setFolderProvider(nil)
     Repo.invalidateWalkCache()
     Repo.invalidateAllCache()
 end
@@ -350,6 +351,111 @@ test("getAll: placeholders are scoped to the folder they belong to", function()
     Repo.invalidateWalkCache(); Repo.invalidateAllCache()
     local _items2, total2 = Repo.getAll("/lib", 10, 0)
     assert(total2 == 3, "the same entry aimed at /lib must appear, got " .. tostring(total2))
+end)
+
+-- ============================================================================
+-- Folders
+--
+-- getAll drops any directory with no book FILE under it. Without the folder
+-- provider a folder whose books are all still on the server is either empty
+-- (dropped) or absent from disk (never listed), so its placeholders have no
+-- card to tap and the feature is invisible on a freshly paired device.
+-- ============================================================================
+
+-- /lib holds one empty directory and two loose books. "ghost" exists nowhere.
+local function stubWithEmptyDir()
+    local LISTING = {
+        ["/lib"]       = { ".", "..", "beta.epub", "delta.epub", "hollow" },
+        ["/lib/hollow"] = { ".", ".." },
+    }
+    local DIRS = { ["/lib"] = true, ["/lib/hollow"] = true }
+    lfs_stub.dir = function(path)
+        local files = LISTING[path] or {}
+        local i = 0; return function() i = i + 1; return files[i] end
+    end
+    lfs_stub.attributes = function(fp, key)
+        if not LISTING[fp] and not fp:find("%.epub$") then return nil end
+        local mode = DIRS[fp] and "directory" or "file"
+        if key == "mode" then return mode end
+        if key == "modification" then return 0 end
+        if key == nil then return { mode = mode, modification = 0, size = 9 } end
+    end
+    _G._test_bim_data = {
+        ["/lib/beta.epub"]  = { title = "Beta",  has_meta = true },
+        ["/lib/delta.epub"] = { title = "Delta", has_meta = true },
+    }
+    _G._test_settings = { home_dir = "/lib" }
+end
+
+local function foldersOf(items)
+    local out = {}
+    for _i, it in ipairs(items or {}) do
+        if it.kind == "folder" then out[#out + 1] = tostring(it.label) end
+    end
+    table.sort(out)
+    return out
+end
+
+test("an empty folder is dropped when nothing claims it", function()
+    reset(); stubWithEmptyDir()
+    local items = Repo.getAll("/lib", 10, 0)
+    assert(#foldersOf(items) == 0,
+        "control: upstream drops a folder with no books, got "
+        .. table.concat(foldersOf(items), ","))
+end)
+
+test("an empty folder SURVIVES when it holds placeholders", function()
+    reset(); stubWithEmptyDir()
+    Placeholders.setFolderProvider(function(path)
+        return path == "/lib" and { "hollow" } or {}
+    end)
+    Repo.invalidateWalkCache(); Repo.invalidateAllCache()
+    local items = Repo.getAll("/lib", 10, 0)
+    assert(table.concat(foldersOf(items), ",") == "hollow",
+        "the folder must survive so its placeholders are reachable, got "
+        .. table.concat(foldersOf(items), ","))
+end)
+
+test("a folder that is not on disk at all is synthesised", function()
+    reset(); stubWithEmptyDir()
+    Placeholders.setFolderProvider(function(path)
+        return path == "/lib" and { "ghost" } or {}
+    end)
+    Repo.invalidateWalkCache(); Repo.invalidateAllCache()
+    local items = Repo.getAll("/lib", 10, 0)
+    assert(table.concat(foldersOf(items), ",") == "ghost",
+        "a folder existing only on the account must be listed, got "
+        .. table.concat(foldersOf(items), ","))
+end)
+
+test("a synthesised folder is not duplicated when it IS on disk", function()
+    reset(); stubWithEmptyDir()
+    Placeholders.setFolderProvider(function(path)
+        return path == "/lib" and { "hollow" } or {}
+    end)
+    Repo.invalidateWalkCache(); Repo.invalidateAllCache()
+    local items = Repo.getAll("/lib", 10, 0)
+    local f = foldersOf(items)
+    assert(#f == 1, "expected exactly one 'hollow', got " .. #f .. ": " .. table.concat(f, ","))
+end)
+
+test("folder provider: junk and traversal attempts are dropped", function()
+    reset(); stubWithEmptyDir()
+    Placeholders.setFolderProvider(function() return { "", ".", "..", "a/b", 42, "ok" } end)
+    local set = Placeholders.folderNamesFor("/lib")
+    assert(set["ok"] == true, "a plain name must survive")
+    for _k, bad in ipairs({ "", ".", "..", "a/b" }) do
+        assert(set[bad] == nil, "must reject: " .. tostring(bad))
+    end
+end)
+
+test("folder provider: one that throws leaves the listing intact", function()
+    reset(); stubWithEmptyDir()
+    Placeholders.setFolderProvider(function() error("catalogue on fire") end)
+    Repo.invalidateWalkCache(); Repo.invalidateAllCache()
+    local items, total = Repo.getAll("/lib", 10, 0)
+    assert(total == 2, "the two real books must still list, got " .. tostring(total))
+    assert(#foldersOf(items) == 0)
 end)
 
 reset()

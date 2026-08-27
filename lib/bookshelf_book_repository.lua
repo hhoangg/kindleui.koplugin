@@ -2938,9 +2938,38 @@ function Repo.getAll(path, limit, offset, sort_priority, filter, opts)
     -- page (which would put every one of them last and desync the total the
     -- caller paginates against). Empty unless a sync plugin registered a
     -- provider, so a stock install walks exactly the path it always did.
+    local ph_dirs = {}
     do
         local ph_entries = Placeholders.entriesFor(path)
         for _i, e in ipairs(ph_entries) do entries[#entries + 1] = e end
+
+        -- Folders the account has that this device does not. Two distinct
+        -- cases, and both would otherwise hide their contents completely:
+        --
+        --   * the directory exists here but is empty (every book in it is
+        --     still on the server) -- the emptiness check below drops it;
+        --   * the directory does not exist here at all -- lfs never saw it.
+        --
+        -- Either way there is no folder card, so nothing to tap, so the
+        -- placeholders inside are unreachable. Synthesised here, before the
+        -- sort, for the same reason the books are.
+        ph_dirs = Placeholders.folderNamesFor(path)
+        local seen_dir = {}
+        for _i, e in ipairs(entries) do
+            if e.attr and e.attr.mode == "directory" then seen_dir[e.name] = true end
+        end
+        for name in pairs(ph_dirs) do
+            if not seen_dir[name] then
+                local sep = (path:sub(-1) == "/") and "" or "/"
+                entries[#entries + 1] = {
+                    name = name,
+                    fp   = path .. sep .. name,
+                    attr = { mode = "directory", size = 0, modification = 0 },
+                    ph_dir = true,
+                    doc_props = { display_title = name },
+                }
+            end
+        end
     end
 
     -- Pre-fetch data required by the comparator before sorting so each
@@ -3229,11 +3258,16 @@ function Repo.getAll(path, limit, offset, sort_priority, filter, opts)
             -- second, unbounded folderHasBooks walk to decide whether the
             -- folder is truly empty; books deeper than the bound keep their
             -- folder card, just without a cover (same as before).
-            local first_fp = Repo.findFirstBookIn(e.fp, 3)
+            -- A folder the account has: skip both filesystem probes when it is
+            -- not on disk (they would walk a path that does not exist), and
+            -- keep it regardless of what they answer when it is -- an empty
+            -- directory whose books are all still on the server must survive.
+            local ph_folder = e.ph_dir or ph_dirs[e.name] or false
+            local first_fp = (not e.ph_dir) and Repo.findFirstBookIn(e.fp, 3) or nil
             if first_fp then
                 _folderHasBooks_cache[e.fp] = true
             end
-            if first_fp or Repo.folderHasBooks(e.fp) then
+            if ph_folder or first_fp or Repo.folderHasBooks(e.fp) then
                 -- findFirstBookIn returns just the filepath; per-page
                 -- hydration below builds the actual Book record with cover.
                 shapes[#shapes + 1] = {
