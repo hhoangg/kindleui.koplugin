@@ -23,14 +23,19 @@ return {
     description = _([[Kindle's interface for KOReader: a home screen you pick a book from, a control centre from the top edge, a reading toolbar, a page browser, a settings page and a lock screen.
 
 Forked from bookshelf.koplugin by AndyHazz, which is the home screen and the larger part of this.]]),
-    -- Four parts, and every one of them numeric on purpose.
+    -- Numeric parts only, and that is not a style choice.
     --
     -- The updater compares versions with `tonumber(part) or 0` over
     -- dot-separated pieces (bookshelf_updater.lua:66), so anything non-numeric
-    -- silently becomes ZERO: "4.3.5-kindleui.1" parses as [4,3,0,1] and reads
-    -- as OLDER than upstream's 4.3.5, which would offer every user a downgrade.
+    -- silently becomes ZERO: "0.1.0-beta" parses as [0,1,0,0] and a later
+    -- "0.1.0" would not read as newer. Keep every part a number.
     --
-    -- So the fork's build number is a fourth numeric part. It says which
-    -- upstream release this is built on, and sorts above it.
-    version = "4.3.5.1",
+    -- 0.x because this fork is new and its own interface is still moving,
+    -- whatever upstream's number is. The updater only ever compares this
+    -- against releases of THIS repository -- it was pointed here in the same
+    -- change that set this line -- so upstream's 4.3.5 is not a number this
+    -- has to sit above, or beside, or below. The upstream release a build is
+    -- made from is recorded in the release notes, which is where a human looks
+    -- for it, rather than smuggled into a field only a comparator reads.
+    version = "0.1.0",
 }

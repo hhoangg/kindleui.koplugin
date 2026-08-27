@@ -104,6 +104,11 @@ local TOP_OVERRIDES = {
 local TOP_TAP_OVERRIDES = {
     "readermenu_ext_tap", "readermenu_tap",
     "tap_forward", "tap_backward",
+    -- The FILE MANAGER has its own pair, registered separately
+    -- (filemanagermenu.lua:82, :91) and pointing at the same onTapShowMenu.
+    -- Without these, a tap on the top edge of the home screen still opened
+    -- KOReader's stock menu -- so the shelf and the reader disagreed about
+    -- what that edge does, which is the one thing an edge gesture must not do.
 }
 
 local BOTTOM_OVERRIDES = {
@@ -262,6 +267,45 @@ function KindleUI:_controlCentreZones(prefix, overrides)
     return zones, top, top_ext
 end
 
+--- Stop the file manager's own top-edge tap from opening KOReader's menu.
+--
+-- Registered on `ui.menu`, NOT on `ui`, and that is the whole trick. Replacing
+-- a zone by id only works within the graph it was registered on
+-- (inputcontainer.lua:139-141), and FileManagerMenu is its OWN InputContainer
+-- with its own `_zones` (filemanagermenu.lua:24, :80). Registering these ids on
+-- the FileManager put them in a different graph entirely, where they replaced
+-- nothing and the stock menu kept opening -- which is exactly what happened.
+--
+-- `overrides` cannot do this job either: it changes the order zones are tried
+-- in, and the overridden zone still runs when the one ahead of it declines
+-- (inputcontainer.lua:onGesture).
+--
+-- The handler DECLINES rather than swallowing. The band is the top 1/8 across
+-- the full width, which on the home screen covers the head of the hero card, so
+-- consuming the tap would trade a menu nobody wanted for a dead strip over the
+-- book they are reading. Returning false lets the gesture fall through to
+-- bookshelf's own ges_events, where the hero listens.
+function KindleUI:_suppressStockMenuTap()
+    local ui = self.ui
+    if ui and ui.document then return end          -- reader has its own handling
+    local menu = ui and ui.menu
+    if not (menu and type(menu.registerTouchZones) == "function") then return end
+    if not self:isEnabled("suppress_stock_menu", true) then return end
+
+    local function declineTap() return false end
+    local ok, err = pcall(menu.registerTouchZones, menu, {
+        { id = "filemanager_tap", ges = "tap",
+          screen_zone = { ratio_x = 0, ratio_y = 0, ratio_w = 1, ratio_h = 1/8 },
+          handler = declineTap },
+        { id = "filemanager_ext_tap", ges = "tap",
+          screen_zone = { ratio_x = 1/4, ratio_y = 0, ratio_w = 2/4, ratio_h = 1/5 },
+          handler = declineTap },
+    })
+    if not ok then
+        logger.warn("kindleui: could not take over the file manager menu tap:", tostring(err))
+    end
+end
+
 --- Takes the band back off a home screen we had grafted it onto.
 --
 -- Needed because that widget is not ours to rebuild. Turning the control centre
@@ -352,6 +396,11 @@ function KindleUI:setupTouchZones()
     if #zones > 0 then
         ui:registerTouchZones(zones)
     end
+    -- Outside that guard on purpose: this registers on a DIFFERENT object
+    -- (ui.menu) and has nothing to do with whether we ended up with zones of
+    -- our own. Inside it, turning the control centre off would silently bring
+    -- KOReader's menu back.
+    self:_suppressStockMenuTap()
     logger.info("kindleui: registered", #zones, "touch zones on",
                 ui.document and "ReaderUI" or "FileManager")
 
@@ -846,10 +895,23 @@ end
 function KindleUI:addToMainMenu(menu_items)
     menu_items.kindleui = {
         text = _("Kindle-style UI"),
+        -- `id` so the settings page can name this group directly rather than
+        -- hunting for it by title. Without one it is reachable only by
+        -- whatever tab MenuSorter files it under.
+        id = "kindleui",
+        -- Still taps_and_gestures for KOReader's OWN menu, which has nowhere
+        -- better to put a plugin. The settings page no longer inherits that
+        -- placement: it names this id under "Appearance", where a lock screen
+        -- belongs. Under the stock menu it was four levels down inside a group
+        -- described as "Font, layout, page turns", which cost the owner ten
+        -- minutes and left him unable to repeat the route.
         sorting_hint = "taps_and_gestures",
         sub_item_table = {
             {
                 text = _("Swipe down opens the control centre"),
+                -- `id` so the settings page can give this row an icon; it
+                -- keys on ids, never on titles.
+                id = "kindleui_swipe_down",
                 help_text = _("Without this, swiping down from the top opens KOReader's two stock panels at once: the top menu and the bottom style strip."),
                 checked_func = function() return self:isEnabled("control_centre", true) end,
                 callback = function()
@@ -860,6 +922,9 @@ function KindleUI:addToMainMenu(menu_items)
             },
             {
                 text = _("Swipe up opens Go to"),
+                -- `id` so the settings page can give this row an icon; it
+                -- keys on ids, never on titles.
+                id = "kindleui_swipe_up",
                 help_text = _("Replaces the bottom style strip with the chapter list."),
                 checked_func = function() return self:isEnabled("page_browser", true) end,
                 callback = function()
@@ -870,6 +935,9 @@ function KindleUI:addToMainMenu(menu_items)
             },
             {
                 text = _("Tap the top edge opens the reading toolbar"),
+                -- `id` so the settings page can give this row an icon; it
+                -- keys on ids, never on titles.
+                id = "kindleui_tap_top",
                 help_text = _("Kindle splits the surface three ways: the device belongs to the swipe-down panel, the book to this toolbar, and your position in it to the swipe-up panel."),
                 checked_func = function() return self:isEnabled("toolbar", true) end,
                 callback = function()
@@ -880,14 +948,69 @@ function KindleUI:addToMainMenu(menu_items)
                 separator = true,
             },
             {
+                text = _("Top edge does not open KOReader's menu"),
+                id = "kindleui_suppress_menu",
+                help_text = _("On the home screen, a tap near the top edge opens KOReader's own menu. This turns that off, so the top of the screen belongs to the shelf and everything is reached from Settings instead.\n\nThe tap is declined rather than swallowed, so whatever is underneath -- the book on the hero card -- still answers it."),
+                checked_func = function() return self:isEnabled("suppress_stock_menu", true) end,
+                callback = function()
+                    G_reader_settings:saveSetting("kindleui_suppress_stock_menu",
+                        not self:isEnabled("suppress_stock_menu", true))
+                    -- The zones live on the FileManager, which a settings
+                    -- change does not rebuild, so they are re-registered here
+                    -- or the toggle would mean nothing until the next launch.
+                    self:setupTouchZones()
+                end,
+                separator = true,
+            },
+            {
                 text = _("Lock screen"),
+                -- `id` so the settings page can give this row an icon; it
+                -- keys on ids, never on titles.
+                id = "kindleui_lock_screen",
                 separator = true,
                 sub_item_table_func = function() return self:lockScreenMenu() end,
             },
             {
                 text = _("Show control centre now"),
+                -- `id` so the settings page can give this row an icon; it
+                -- keys on ids, never on titles.
+                id = "kindleui_show_cc",
                 keep_menu_open = false,
                 callback = function() self:onShowKindleControlCentre() end,
+            },
+            {
+                text = _("Restart KOReader"),
+                -- `id` so the settings page can give this row an icon; it
+                -- keys on ids, never on titles.
+                id = "kindleui_restart",
+                separator = true,
+                keep_menu_open = false,
+                -- Asked for, because plugin work means restarting often and the
+                -- alternative is exiting to the Kindle home screen and back.
+                --
+                -- Restart, not exit: KOReader's own `restart` event brings it
+                -- back up, where `exit` leaves the reader on the firmware's
+                -- home screen wondering what happened.
+                callback = function()
+                    local UIManager = require("ui/uimanager")
+                    local ConfirmBox = require("ui/widget/confirmbox")
+                    UIManager:show(ConfirmBox:new{
+                        text = _("Restart KOReader?\n\nThe book you are reading is closed properly first, so your place is kept."),
+                        ok_text = _("Restart"),
+                        ok_callback = function()
+                            -- restartKOReader, not a signal and not an exit.
+                            --
+                            -- It quits with status 85, which the launcher
+                            -- treats as "start me again" -- verified on this
+                            -- device at koreader.sh:329, `while
+                            -- [ "${RETURN_VALUE}" -eq 85 ]`. Quitting through
+                            -- UIManager is also what closes the document and
+                            -- flushes settings; killing the process does
+                            -- neither, and loses the reading position.
+                            UIManager:restartKOReader()
+                        end,
+                    })
+                end,
             },
         },
     }

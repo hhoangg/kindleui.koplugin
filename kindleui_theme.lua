@@ -45,6 +45,17 @@ Theme.GLYPH = {
     user       = "\u{F007}",
     grid       = "\u{F00A}",
     check      = "\u{F00C}",
+    -- A real switch, not a tick.
+    --
+    -- A tick can only say "on"; there is no "unticked" glyph, so an off toggle
+    -- rendered as nothing at all -- indistinguishable from a row that is not a
+    -- toggle. Both states have to be visible or the column is unreadable.
+    --
+    -- Both are already in the bundled symbols.ttf; verified by reading its cmap
+    -- on the device rather than trusting that a Font Awesome codepoint made it
+    -- into this subset.
+    toggle_on  = "\u{F205}",
+    toggle_off = "\u{F204}",
     close      = "\u{F00D}",
     cog        = "\u{F013}",
     home       = "\u{F015}",
@@ -129,6 +140,26 @@ end
 -- Every screen needs this and none of them needs anything more elaborate, so it
 -- lives here rather than being reinvented four times.
 --------------------------------------------------------------------------------
+--- The child's size as a NEW rectangle.
+--
+-- `WidgetContainer:getSize()` returns `self.dimen` itself when the container
+-- has a fixed size -- the table, not a copy (widgetcontainer.lua). Assigning
+-- that to `self.dimen` here and then writing x/y into it edits the CHILD's
+-- geometry, and the child is entitled to write to it too.
+--
+-- LeftContainer does exactly that: it centres its content by setting
+-- `self.dimen.y = y + (self.dimen.h - contentSize.h)/2`. Sharing one table
+-- meant the tap rectangle inherited that offset while keeping the full height,
+-- so the header's back button highlighted a band pushed ~33px down and bleeding
+-- past the header into the list below it. Reported from the device.
+--
+-- Copying costs one table per paint and makes the whole class of "my rectangle
+-- moved and I did not move it" impossible.
+local function copySize(widget)
+    local sz = widget:getSize()
+    return Geom:new{ x = 0, y = 0, w = sz.w, h = sz.h }
+end
+
 local Tappable = InputContainer:extend{
     on_tap = nil,
     -- Set when the row should render but not respond (Bluetooth in the control
@@ -139,7 +170,7 @@ local Tappable = InputContainer:extend{
 
 function Tappable:init()
     if not self[1] then return end
-    self.dimen = self[1]:getSize()
+    self.dimen = copySize(self[1])
     if not Device:isTouchDevice() then return end
     local GestureRange = require("ui/gesturerange")
     self.ges_events = {
@@ -151,7 +182,7 @@ function Tappable:paintTo(bb, x, y)
     -- The dimen has to be refreshed on every paint, not just at init: the
     -- parent group decides where this lands, and a stale rect would route taps
     -- to wherever the widget used to be.
-    self.dimen = self[1]:getSize()
+    self.dimen = copySize(self[1])
     self.dimen.x, self.dimen.y = x, y
     return InputContainer.paintTo(self, bb, x, y)
 end

@@ -4688,42 +4688,104 @@ function Settings:_about()
     -- live from _meta.lua so any release that touches version=... in
     -- that file flows through automatically -- there's no other
     -- string to keep in sync.
-    local ver_face, ver_bold = BFont:getFace("cfont", 16)
+    -- ── this plugin ─────────────────────────────────────────────────────────
+    local ver_face = BFont:getFace("cfont", 16)
     column[#column + 1] = TextWidget:new{
         text = "v" .. version,
         face = ver_face,
-        bold = ver_bold,
+        fgcolor = Blitbuffer.COLOR_DARK_GRAY,
     }
     column[#column + 1] = VerticalSpan:new{ width = Size.padding.large }
-    local desc_face, desc_bold = BFont:getFace("cfont", 16)
+
+    local desc_face = BFont:getFace("cfont", 15)
     column[#column + 1] = TextBoxWidget:new{
         text      = description,
         face      = desc_face,
-        bold      = desc_bold,
         width     = content_w,
         alignment = "center",
     }
     column[#column + 1] = VerticalSpan:new{ width = Size.padding.large }
-    -- Tappable URL: tries Device:openLink (works on SDL / Android), then
-    -- falls back to copying to KOReader's internal clipboard + a brief
-    -- Notification. On Kindle there's no native browser so the
-    -- clipboard path is the user-meaningful one (paste into a Send-to-
-    -- Kindle-style helper, or just read the URL clearly).
-    local Button = require("ui/widget/button")
-    local function open_github()
-        local ok = false
-        if Device.openLink then
-            local _ok, ret = pcall(function() return Device:openLink(GITHUB_URL) end)
-            if _ok and ret then ok = true end
-        end
-        if not ok and Device.input and Device.input.setClipboardText then
-            pcall(function() Device.input.setClipboardText(GITHUB_URL) end)
-            local Notification = require("ui/widget/notification")
-            UIManager:show(Notification:new{
-                text = _("Link copied to clipboard"),
-            })
+
+    -- ── who made it ─────────────────────────────────────────────────────────
+    --
+    -- Kept to two lines. An About box is read once, and a reader looking for
+    -- "whose is this and where do I complain" is not helped by a paragraph.
+    local by_face = BFont:getFace("cfont", 15)
+    column[#column + 1] = TextWidget:new{
+        text = _("by hhoangg"),
+        face = by_face,
+    }
+    column[#column + 1] = VerticalSpan:new{ width = Size.padding.small }
+    column[#column + 1] = TextWidget:new{
+        text = "ko-fi.com/hhoangg",
+        face = BFont:getFace("cfont", 14),
+        fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+    }
+    column[#column + 1] = VerticalSpan:new{ width = Size.padding.large }
+
+    -- ── what it is built on ─────────────────────────────────────────────────
+    --
+    -- Order is deliberate and it is the order of dependency, not of credit:
+    -- this plugin, then the reader it is a plugin FOR, then the plugin it is a
+    -- fork OF. A reader who wants to know what they are running reads down.
+    --
+    -- The rule separates "this" from "what this stands on" so the version above
+    -- is never mistaken for KOReader's -- which is the one number people
+    -- actually go looking for in an About box.
+    local LineWidget = require("ui/widget/linewidget")
+    column[#column + 1] = LineWidget:new{
+        background = Blitbuffer.COLOR_LIGHT_GRAY,
+        dimen = Geom:new{ w = math.floor(content_w * 0.5), h = Size.line.thin },
+    }
+    column[#column + 1] = VerticalSpan:new{ width = Size.padding.default }
+
+    local stack_label_face = BFont:getFace("cfont", 13)
+    local stack_face       = BFont:getFace("cfont", 14)
+    column[#column + 1] = TextWidget:new{
+        text = _("Built on"),
+        face = stack_label_face,
+        fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+    }
+    column[#column + 1] = VerticalSpan:new{ width = Size.padding.small }
+
+    -- KOReader's own version, read from KOReader rather than guessed. It is
+    -- normalised because getCurrentRevision returns the raw git describe, which
+    -- on a release build is long and on a dev build is longer.
+    local ko_version = "?"
+    do
+        local ok_v, Version = pcall(require, "version")
+        if ok_v and Version then
+            local ok_n, v = pcall(function() return Version:getNormalizedCurrentVersion() end)
+            if ok_n and v then ko_version = tostring(v) end
         end
     end
+    column[#column + 1] = TextWidget:new{
+        text = "KOReader  " .. ko_version,
+        face = stack_face,
+    }
+    column[#column + 1] = VerticalSpan:new{ width = Size.padding.small }
+
+    -- The fork's origin. Named with its author because that is the whole point
+    -- of saying it, and with the upstream release this build was merged from --
+    -- which the plugin's own version deliberately does not encode.
+    column[#column + 1] = TextWidget:new{
+        text = "bookshelf.koplugin  " .. (meta and meta.upstream_version or "v4.3.5"),
+        face = stack_face,
+    }
+    column[#column + 1] = VerticalSpan:new{ width = Size.padding.small }
+    column[#column + 1] = TextWidget:new{
+        text = _("by AndyHazz"),
+        face = BFont:getFace("cfont", 13),
+        fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+    }
+    column[#column + 1] = VerticalSpan:new{ width = Size.padding.small }
+    column[#column + 1] = TextWidget:new{
+        text = "AGPL-3.0",
+        face = BFont:getFace("cfont", 13),
+        fgcolor = Blitbuffer.COLOR_DARK_GRAY,
+    }
+    column[#column + 1] = VerticalSpan:new{ width = Size.padding.large }
+
     column[#column + 1] = Button:new{
         text       = GITHUB_URL_DISPLAY,
         bordersize = 0,

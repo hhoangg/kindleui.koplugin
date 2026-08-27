@@ -90,6 +90,7 @@ local Blitbuffer = require("ffi/blitbuffer")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local Device = require("device")
 local Geom = require("ui/geometry")
+local LeftContainer = require("ui/widget/container/leftcontainer")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
 local InfoMessage = require("ui/widget/infomessage")
@@ -101,9 +102,14 @@ local UIManager = require("ui/uimanager")
 local VerticalGroup = require("ui/widget/verticalgroup")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Layout = require("kindleui_geom") -- this plugin's proportions, not ui/geometry
+local MENU_ICONS = require("kindleui_menu_icons")
 local Theme = require("kindleui_theme")
 local logger = require("logger")
 local _ = require("gettext")
+-- Needed by every message below that interpolates. Missing it is not a syntax
+-- error; it is `attempt to call global 'T'` the first time such a message is
+-- built, which no compile check catches.
+local T = require("ffi/util").template
 local Screen = Device.screen
 
 local GLYPH = Theme.GLYPH
@@ -128,6 +134,7 @@ local Header = WidgetContainer:extend{
     title = nil,
     -- Called for the ⋮ glyph and the ✕ glyph respectively.
     on_overflow = nil,
+    on_search = nil,
     on_close = nil,
     -- Called when the ‹ glyph is tapped; the glyph only appears when this
     -- returns true, i.e. when the Menu has something on its item_table_stack.
@@ -154,51 +161,128 @@ function Header:update()
     local gap = Layout.x(REF.gap)
     local screen_w = Screen:getWidth()
 
-    local row = HorizontalGroup:new{ align = "center", HorizontalSpan:new{ width = margin } }
+    -- Every header control is a BLOCK, not a glyph.
+    --
+    -- A Tappable wrapped straight around a TextWidget has the glyph's own ink
+    -- box for a hit area -- a chevron is a few tens of pixels of actual mark,
+    -- so the tap has to land on the stroke itself. Reported from the device:
+    -- going back meant hitting the arrow exactly.
+    --
+    -- The firmware treats each of these as a square button, and squares are
+    -- also what makes them reachable: the target becomes the whole cell rather
+    -- than the drawing inside it. `hit` is the cell, sized from the band it
+    -- lives in, not from the glyph.
+    local hit = Layout.y(REF.title_bar_h)
+    local function iconButton(glyph, on_tap, label)
+        if label then
+            -- Back carries its label INSIDE the button, so tapping the words
+            -- goes back too. Otherwise the title beside a back arrow is dead
+            -- space that looks exactly like part of the control.
+            --
+            -- LEFT-ALIGNED, and padded by a gap rather than by a whole cell.
+            -- The first version centred this inside a cell `hit` wider than its
+            -- contents, which put half a title bar of empty space on each side
+            -- -- so the chevron floated away from the margin and the word
+            -- floated away from the chevron. It measured as a button and read
+            -- as a mistake.
+            local inner = HorizontalGroup:new{
+                align = "center",
+                TextWidget:new{ text = glyph, face = self.face_glyph, padding = 0 },
+                HorizontalSpan:new{ width = math.floor(gap / 2) },
+                TextWidget:new{
+                    text = label, face = self.face_title, padding = 0,
+                    max_width = screen_w - 2 * margin - 3 * hit,
+                },
+            }
+            -- Flush to the screen edge, with a MARGIN OF PADDING ON EACH SIDE.
+            --
+            -- Both halves matter and the first attempt only had one. Reaching
+            -- x = 0 makes the highlight run to the edge the way the firmware's
+            -- does; equal padding is what stops it looking like the button was
+            -- mis-measured. A margin on the left and a half-gap on the right
+            -- put the chevron in the right place and still read as lopsided,
+            -- because it was.
+            --
+            -- The padding lives INSIDE the button rather than in front of it,
+            -- so the glyph still lands on the margin: it grows inward, never
+            -- outward into the layout.
+            return Theme.Tappable:new{
+                on_tap = on_tap,
+                CenterContainer:new{
+                    dimen = Geom:new{ w = inner:getSize().w + 2 * margin, h = hit },
+                    inner,
+                },
+            }
+        end
+        -- Icon-only controls follow the SAME rule: a margin of padding either
+        -- side of the glyph. That makes them flush at their edge with the glyph
+        -- sitting on the margin, exactly like the labelled one, rather than a
+        -- square whose size happens to be close to that.
+        local g = TextWidget:new{ text = glyph, face = self.face_glyph, padding = 0 }
+        return Theme.Tappable:new{
+            on_tap = on_tap,
+            CenterContainer:new{
+                dimen = Geom:new{ w = g:getSize().w + 2 * margin, h = hit },
+                g,
+            },
+        }
+    end
+
+    -- Nothing in front of a labelled button: it carries its own leading margin
+    -- so it can start at the screen edge. A plain title still needs one.
+    local lead = (self.is_nested and self.is_nested()) and 0 or margin
+    local row = HorizontalGroup:new{ align = "center", HorizontalSpan:new{ width = lead } }
 
     -- Kindle's sub-pages put a back chevron left of the title. Without one the
     -- only ways back would be a swipe south (Menu:onSwipe, menu.lua:1490) or a
     -- hardware key, neither of which is visible.
-    if self.is_nested and self.is_nested() then
-        table.insert(row, Theme.Tappable:new{
-            on_tap = self.on_back,
-            TextWidget:new{ text = GLYPH.chev_left, face = self.face_glyph, padding = 0 },
-        })
-        table.insert(row, HorizontalSpan:new{ width = math.floor(gap / 2) })
+    -- On a sub-page the back control IS the title: one button carrying the
+    -- chevron and the page name, so the whole thing goes back. On the root
+    -- there is nothing to go back to, so the title is plain text.
+    local nested = self.is_nested and self.is_nested()
+    local title
+    if nested then
+        title = iconButton(GLYPH.chev_left, self.on_back, self.title or "")
+    else
+        title = TextWidget:new{
+            text = self.title or "",
+            face = self.face_title,
+            padding = 0,
+            max_width = screen_w - 2 * margin - 3 * hit,
+        }
     end
-
-    local title = TextWidget:new{
-        text = self.title or "",
-        face = self.face_title,
-        padding = 0,
-        -- Leave room for both glyphs plus their gaps before truncating.
-        max_width = screen_w - 2 * margin - 4 * Layout.x(REF.icon_h),
-    }
     table.insert(row, title)
 
-    local overflow = Theme.Tappable:new{
-        on_tap = self.on_overflow,
-        TextWidget:new{ text = GLYPH.ellipsis_v, face = self.face_glyph, padding = 0 },
-    }
-    local close = Theme.Tappable:new{
-        on_tap = self.on_close,
-        TextWidget:new{ text = GLYPH.close, face = self.face_glyph, padding = 0 },
-    }
+    -- The overflow button is gone from here. It opened "All settings", which is
+    -- a destination like any other -- now the last row of the list, where a
+    -- fallback belongs. A header is for acting on this page, and listing every
+    -- menu KOReader has is not that.
+    --
+    -- Search IS an action on this page, so it stays. Root only: a sub-page
+    -- already has the back button on the left, and three controls across a
+    -- header is one more than a header can hold without becoming a toolbar.
+    local search = (not nested) and self.on_search
+                   and iconButton(GLYPH.search, self.on_search) or nil
+    local close = iconButton(GLYPH.close, self.on_close)
 
     -- Flexible space: title hard left, the two glyphs hard right.
-    local used = margin * 2 + title:getSize().w + overflow:getSize().w + close:getSize().w + gap
+    --
+    -- Everything already IN the row is measured by the loop -- the leading span
+    -- and the title both live there by now -- so the base holds only what has
+    -- not been inserted yet. Adding `lead` to the base as well double-counted
+    -- it and stole that many pixels from the gap in the middle.
+    -- The close button sits flush against the right edge, so there is no
+    -- trailing margin to reserve either.
+    local used = close:getSize().w + (search and search:getSize().w or 0)
     for _idx, widget in ipairs(row) do
-        if widget ~= title then used = used + widget:getSize().w end
+        used = used + widget:getSize().w
     end
-    used = used - margin -- the leading span is already counted in margin * 2
     local flex = screen_w - used
     if flex < gap then flex = gap end
 
     table.insert(row, HorizontalSpan:new{ width = flex })
-    table.insert(row, overflow)
-    table.insert(row, HorizontalSpan:new{ width = gap })
+    if search then table.insert(row, search) end
     table.insert(row, close)
-    table.insert(row, HorizontalSpan:new{ width = margin })
 
     self[1] = VerticalGroup:new{
         align = "left",
@@ -312,7 +396,13 @@ end
 -- neither) and a landmine the next time upstream starts reading one of them.
 -- The original is kept on `kindleui_src` so selection can consult the live
 -- entry rather than our copy.
-local function decorate(list)
+--- `opts` carries the two measurements the icon column needs.
+--
+-- decorate is a plain local, not a method, so there is no `self` here -- the
+-- first version read `self.glyph_col_w` and would have been nil at run time,
+-- which no syntax check catches. The caller has them and passes them in.
+local function decorate(list, opts)
+    opts = opts or {}
     local out = {}
     for _idx, src in ipairs(list) do
         if type(src) == "table" and (src.text or src.text_func)
@@ -324,6 +414,22 @@ local function decorate(list)
             for k, v in pairs(src) do copy[k] = v end
             copy.kindleui_src = src
 
+            -- An icon in the left column, the same place the eleven top-level
+            -- rows put theirs, so a sub-page reads as the same kind of screen
+            -- rather than as a bare list.
+            --
+            -- Keyed on the id: a title is translated and a title gets reworded,
+            -- an id is neither. Rows KOReader gives no id -- a plugin's own
+            -- entries, mostly -- get no icon rather than a wrong one, and the
+            -- column simply stays empty for them.
+            local icon = src.id and MENU_ICONS[src.id]
+            if icon and opts.glyph_col_w and opts.glyph_face then
+                copy.state = CenterContainer:new{
+                    dimen = Geom:new{ w = opts.glyph_col_w, h = Layout.y(REF.icon_h) },
+                    TextWidget:new{ text = icon, face = opts.glyph_face, padding = 0 },
+                }
+            end
+
             if src.checked_func or src.checked ~= nil then
                 -- MenuItem draws no checkbox. A tick in the right-hand
                 -- "mandatory" column is the only place check state can go, and
@@ -333,10 +439,31 @@ local function decorate(list)
                 copy.mandatory_func = function()
                     local base = src.mandatory_func and src.mandatory_func() or src.mandatory
                     local checked = src.checked_func and src.checked_func() or src.checked
-                    if checked then
+                    -- BOTH states drawn, which a tick cannot do.
+                    --
+                    -- There is no "unticked" glyph, so an off toggle used to
+                    -- render as nothing -- identical to a row that is not a
+                    -- toggle at all. A switch shows its position either way,
+                    -- which is the only thing that makes the column readable.
+                    --
+                    -- `radio` entries keep the tick: a radio is one choice out
+                    -- of a set, and a row of switches where only one can be on
+                    -- reads as a set of independent options that happen to
+                    -- disagree.
+                    -- A radio keeps a tick: it is one choice out of a set, and
+                    -- a row of switches where only one may be on reads as
+                    -- independent options that happen to disagree.
+                    if src.radio then
+                        if not checked then return base end
                         return base and (base .. " " .. GLYPH.check) or GLYPH.check
                     end
-                    return base
+                    -- A real switch is PAINTED over this row, not typed into
+                    -- it -- see _paintSwitches. The glyph is still returned so
+                    -- MenuItem reserves a slot on the right and lays the title
+                    -- out clear of it; the paint then covers the glyph
+                    -- completely, being larger in both directions.
+                    local mark = checked and GLYPH.toggle_on or GLYPH.toggle_off
+                    return base and (base .. " " .. mark) or mark
                 end
             end
 
@@ -370,29 +497,40 @@ local function groupSpecs()
                 -- NetworkMgr:isWifiOn is a stub on the base class and is
                 -- replaced per platform (manager.lua:182; Kindle installs
                 -- sysfsWifiOn at device/kindle/device.lua:523).
-                -- getCurrentNetwork is likewise (manager.lua:195, Kindle at
-                -- device/kindle/device.lua:513) and answers { ssid = ... }.
                 if not NetworkMgr:isWifiOn() then return _("Off") end
                 local nw = NetworkMgr:getCurrentNetwork()
                 return nw and nw.ssid or _("On")
             end,
         },
         {
-            glyph = GLYPH.mobile,
-            title = _("Device options"),
-            refs = { "language", "device/*", "navigation/*" },
+            glyph = GLYPH.adjust,
+            title = _("Appearance"),
+            sub = _("Lock screen, control centre, toolbar"),
+            -- THE ROW THIS PAGE WAS MISSING.
+            --
+            -- Everything this fork actually draws -- the lock screen, the
+            -- control centre, the reading toolbar -- was registered under
+            -- `taps_and_gestures` because that is a convenient place for a
+            -- plugin to attach, and so it ended up inside the "Reading" row,
+            -- described as "Font, layout, page turns", four levels down.
+            --
+            -- Finding the lock screen took the owner ten minutes and he could
+            -- not remember the route afterwards. Nobody would guess it: it is
+            -- not a reading setting and it is not a gesture.
+            refs = { "kindleui/*", "night_mode", "screensaver" },
         },
         {
             glyph = GLYPH.sun,
-            title = _("Screen and brightness"),
-            refs = { "frontlight", "night_mode", "screen/*" },
+            title = _("Screen and Light"),
+            -- Kept apart from Appearance on purpose: one is what the interface
+            -- LOOKS like, the other is how bright the panel is. They read as
+            -- the same thing only until you go looking for one of them.
+            refs = { "frontlight", "screen/*" },
         },
         {
             glyph = GLYPH.font,
             title = _("Reading"),
-            sub = _("Font, layout, page turns"),
-            -- Everything up to taps_and_gestures is reader-only; the file
-            -- manager keeps only the last one, which is why it is here.
+            sub = _("Fonts, layout, page turns"),
             refs = {
                 "change_font", "typography", "set_render_style", "style_tweaks",
                 "document_settings", "page_overlap", "highlight_options",
@@ -401,33 +539,62 @@ local function groupSpecs()
         },
         {
             glyph = GLYPH.book,
-            title = _("Home and Library"),
+            title = _("Library"),
+            sub = _("Home screen, sorting, collections"),
             refs = {
                 "filebrowser_settings", "filemanager_display_mode", "show_filter",
-                "sort_by", "start_with", "history", "favorites", "collections",
-                "bookmark_browser", "document/*",
-                -- bookshelf.koplugin registers a whole TAB of its own
-                -- (`menu_items.bookshelf_tab`), and a tab is not something this
-                -- page can show. Without naming its entries here they were
-                -- reachable only from KOReader's own menu, so a reader who used
-                -- this page as their settings screen simply could not find how
-                -- to configure their home screen. `collect` skips a ref it
-                -- cannot resolve, so these cost nothing when the plugin is
-                -- absent.
+                "sort_by", "reverse_sorting", "sort_mixed",
+                "start_with", "history", "favorites", "collections",
+                "bookmark_browser", "document/*", "open_last_document",
+                "move_to_archive", "calibre",
+                -- bookshelf.koplugin registers a whole TAB of its own, and a
+                -- tab is not something this page can show. `collect` skips a
+                -- ref it cannot resolve, so these cost nothing when absent.
                 "bookshelf_settings", "bookshelf_shelf_size", "bookshelf_shelf_tabs",
-                "bookshelf_hardcover", "bookshelf_updates", "bookshelf_about",
+                "bookshelf_hardcover", "bookshelf_updates", "bookshelf_toggle",
+            },
+        },
+        {
+            glyph = GLYPH.search,
+            title = _("Search and Lookup"),
+            sub = _("Dictionary, Wikipedia, catalogues"),
+            -- KOReader's entire `search` tab, which this page did not reach at
+            -- all. Looking a word up is something you do WHILE reading, and it
+            -- was only ever available from the stock menu.
+            refs = {
+                "dictionary_lookup", "dictionary_lookup_history",
+                "wikipedia_lookup", "wikipedia_history",
+                "file_search", "file_search_results",
+                "find_book_in_calibre_catalog", "opds",
+                "vocabbuilder", "search_settings",
+            },
+        },
+        {
+            glyph = GLYPH.grid,
+            title = _("Tools"),
+            sub = _("Statistics, profiles, export"),
+            -- Most of KOReader's `tools` tab, likewise unreachable from here.
+            refs = {
+                "statistics", "profiles", "exporter", "read_timer",
+                "text_editor", "qrclipboard", "wallabag", "news_downloader",
+                "more_tools",
             },
         },
         {
             glyph = GLYPH.chart,
             title = _("Reading Insights"),
-            -- readinginsights registers this id with no sorting_hint
-            -- (readinginsights.koplugin/main.lua:916), so MenuSorter treats it
-            -- as an orphan and gives it the "NEW: " prefix
-            -- (menusorter.lua:168) -- which is precisely why the row's own
-            -- title is written here rather than taken from the entry.
+            -- readinginsights registers this id with no sorting_hint, so
+            -- MenuSorter treats it as an orphan and gives it a "NEW: " prefix
+            -- -- which is why the row's title is written here rather than
+            -- taken from the entry.
             needs = "reading_insights_popup",
             refs = { "reading_insights_popup/*" },
+        },
+        {
+            glyph = GLYPH.mobile,
+            title = _("Device"),
+            sub = _("Language, gestures, power"),
+            refs = { "language", "device/*", "navigation/*", "ota_update", "exit_menu" },
         },
         {
             glyph = GLYPH.question,
@@ -496,6 +663,7 @@ function KindleUISettings:init()
         on_back = function() self:onClose() end,
         on_close = function() self:onCloseAllMenus() end,
         on_overflow = function() self:showAllSettings() end,
+        on_search = function() self:showSearch() end,
     }
 
     self.item_table = self:buildRoot()
@@ -551,6 +719,27 @@ function KindleUISettings:buildRoot()
     self.sorted_menu = sorted
 
     local rows = {}
+    -- The escape hatch, as the LAST ROW rather than a header control.
+    --
+    -- It used to be the three-dot button in the title bar, which put a
+    -- destination among the actions and hid the one thing a reader reaches for
+    -- when the eleven groups do not have what they want. At the bottom of the
+    -- list it is where a fallback belongs, and it is reachable by scrolling
+    -- rather than by knowing.
+    local function appendAllSettings(list)
+        list[#list + 1] = {
+            state = CenterContainer:new{
+                dimen = Geom:new{ w = self.glyph_col_w, h = Layout.y(REF.icon_h) },
+                TextWidget:new{ text = GLYPH.ellipsis_v, face = self.face_row_glyph, padding = 0 },
+            },
+            text = _("All settings"),
+            post_text = _("Everything KOReader has, ungrouped"),
+            bold = true,
+            mandatory_func = function() return GLYPH.chev_right end,
+            kindleui_all_settings = true,
+        }
+    end
+
     for _idx, spec in ipairs(groupSpecs()) do
         if not spec.needs or self.menu_index[spec.needs] then
             local children = collect(self.menu_index, spec.refs)
@@ -561,6 +750,7 @@ function KindleUISettings:buildRoot()
             end
         end
     end
+    appendAllSettings(rows)
     return rows
 end
 
@@ -646,6 +836,121 @@ function KindleUISettings:_recalculateDimen(no_recalculate_dimen)
     end
 end
 
+--- Draw a real switch over the glyph MenuItem reserved for it.
+--
+-- Wrapping paintTo rather than replacing the mandatory widget inside MenuItem.
+-- The alternative is surgery on a private structure -- FrameContainer, then
+-- HorizontalGroup, then UnderlineContainer, then another HorizontalGroup, then
+-- an OverlapGroup -- to reach a container KOReader is free to rearrange. This
+-- touches nothing: the row paints itself exactly as it always did, and the
+-- switch goes on top afterwards.
+--
+-- It also keeps the tap flash correct for free. MenuItem inverts the row's
+-- rectangle in the framebuffer, so whatever has been painted there inverts with
+-- it, switch included, and inverts back on release.
+--- Give the tap flash time to actually appear before navigating.
+--
+-- MenuItem's own flash is tuned for its own row height. It highlights, forces a
+-- repaint, waits, un-highlights, and queues a "ui" refresh -- and the wait is
+-- `yieldToEPDC()`, which sleeps ONE MILLISECOND (uimanager.lua). On KOReader's
+-- rows that is enough. These rows are 143px tall, and an A2 update over a band
+-- that size takes two orders of magnitude longer, so the un-highlight lands
+-- while the panel is still filling in the black -- which is what the owner saw
+-- and read, reasonably, as something covering the row.
+--
+-- The second half matters as much: the un-highlight is only `setDirty`, so the
+-- next page can be drawn over a rectangle that has not been repainted yet.
+-- Forcing that repaint before selecting is what makes the row return to normal
+-- rather than being replaced mid-flash.
+--
+-- FLASH_US is deliberately generous rather than measured per device. Too short
+-- brings the bug back; too long is a flash somebody notices as a flash, which
+-- is what it is meant to be.
+local FLASH_US = 120 * 1000
+
+function KindleUISettings:_wrapTapFlash(it)
+    if it._kindleui_flash_wrapped then return end
+    it._kindleui_flash_wrapped = true
+    it.onTapSelect = function(self_it, _arg, ges)
+        local frame = self_it[1]
+        if not (frame and frame.dimen) then return end
+        local pos = self_it:getGesPosition(ges)
+        if G_reader_settings:isFalse("flash_ui") then
+            self_it.menu:onMenuSelect(self_it.entry, pos)
+            return true
+        end
+
+        frame.invert = true
+        UIManager:widgetInvert(frame, frame.dimen.x, frame.dimen.y)
+        UIManager:setDirty(nil, "fast", frame.dimen)
+        UIManager:forceRePaint()
+        UIManager:yieldToEPDC(FLASH_US)
+
+        frame.invert = false
+        UIManager:widgetInvert(frame, frame.dimen.x, frame.dimen.y)
+        UIManager:setDirty(nil, "ui", frame.dimen)
+        UIManager:forceRePaint()
+
+        self_it.menu:onMenuSelect(self_it.entry, pos)
+        return true
+    end
+end
+
+function KindleUISettings:_paintSwitches()
+    local Switch = require("kindleui_switch")
+    local Size = require("ui/size")
+    for _idx, it in ipairs(self.item_group or {}) do
+        if type(it) == "table" and it.onTapSelect then self:_wrapTapFlash(it) end
+        local entry = type(it) == "table" and it.entry
+        local src = entry and entry.kindleui_src
+        -- Radio rows keep their tick, so they must not get a switch painted
+        -- over it.
+        if src and not src.radio and (src.checked_func or src.checked ~= nil)
+                and not it._kindleui_switch_wrapped then
+            it._kindleui_switch_wrapped = true
+            local orig_paintTo = it.paintTo
+            it.paintTo = function(self_it, bb, x, y)
+                orig_paintTo(self_it, bb, x, y)
+                local ok = pcall(function()
+                    local h = self_it.dimen and self_it.dimen.h
+                    local w = self_it.dimen and self_it.dimen.w
+                    if not h or not w then return end
+                    local on = src.checked_func and src.checked_func() or src.checked
+                    local sw = Switch:new{ row_h = h, on = on and true or false }
+                    local sz = sw:getSize()
+                    -- Right-aligned inside the same padding MenuItem uses for
+                    -- its own right edge (menu.lua:455), so the switch lands
+                    -- where the glyph it replaces was.
+                    local pad = Size.padding.fullscreen
+
+                    -- ERASE THE GLYPH FIRST.
+                    --
+                    -- It is still in the mandatory column, because that is what
+                    -- makes MenuItem reserve the width and lay the title out
+                    -- clear of it. But a glyph sits on the TEXT BASELINE while
+                    -- the switch is centred on the row, so the two do not cover
+                    -- each other and the old toggle showed underneath the new
+                    -- one.
+                    --
+                    -- Wiping the band is exact, where guessing at how many
+                    -- spaces make up the right width is not. Nothing else is
+                    -- painted out here. Two pixels are left top and bottom so
+                    -- the row's hairline separators survive.
+                    local band_w = sz.w + pad * 2
+                    bb:paintRect(x + w - pad - band_w + pad, y + 2,
+                                 band_w, h - 4, Blitbuffer.COLOR_WHITE)
+
+                    sw:paintTo(bb, x + w - pad - sz.w,
+                                   y + math.floor((h - sz.h) / 2))
+                end)
+                if not ok then
+                    logger.warn("kindleui: switch paint failed")
+                end
+            end
+        end
+    end
+end
+
 --- MenuItem reads `dim` once, at build time (menu.lua:1109), so anything driven
 -- by enabled_func has to be refreshed here or a row would stay greyed after the
 -- condition that greyed it went away.
@@ -657,7 +962,43 @@ function KindleUISettings:updateItems(select_number, no_recalculate_dimen)
             item.dim = (ok and enabled == false) or nil
         end
     end
-    return Menu.updateItems(self, select_number, no_recalculate_dimen)
+    local result = Menu.updateItems(self, select_number, no_recalculate_dimen)
+
+    self:_paintSwitches()
+
+    -- Pin each row's INVERT RECTANGLE to the row.
+    --
+    -- MenuItem flashes a tap by inverting `self[1].dimen` -- its inner
+    -- FrameContainer -- and that frame sizes itself to its content, which comes
+    -- out 145px against a 143px row because UnderlineContainer adds its line on
+    -- top of the height it was given. Measured on the device:
+    --
+    --     row 1  y=117  invert h=145        rows are 143 apart
+    --     row 2  y=260
+    --
+    -- So every tap paints 2px over the top of the NEXT row and leaves it there
+    -- until something else repaints -- which reads as a stray frame across the
+    -- corner of the row below, and is what the owner saw.
+    --
+    -- Setting the dimen up front works because FrameContainer:paintTo only
+    -- fills w/h when there is no dimen yet, and thereafter updates x/y alone
+    -- (framecontainer.lua:106-113). Normally that caching is a hazard; here it
+    -- is exactly the hook needed to say "this rectangle, not the one you would
+    -- measure".
+    if self.item_dimen then
+        for _idx, it in ipairs(self.item_group or {}) do
+            local frame = type(it) == "table" and it[1]
+            if frame and it.dimen then
+                frame.dimen = Geom:new{
+                    x = frame.dimen and frame.dimen.x or 0,
+                    y = frame.dimen and frame.dimen.y or 0,
+                    w = self.item_dimen.w,
+                    h = it.dimen.h,
+                }
+            end
+        end
+    end
+    return result
 end
 
 --------------------------------------------------------------------------------
@@ -682,7 +1023,163 @@ end
 function KindleUISettings:drillDown(title, list, raw)
     self.item_table.title = self.title
     table.insert(self.item_table_stack, self.item_table)
-    self:switchItemTable(title, raw and list or decorate(list))
+    self:switchItemTable(title, raw and list or decorate(list, {
+        glyph_col_w = self.glyph_col_w,
+        glyph_face  = self.face_row_glyph,
+    }))
+end
+
+--------------------------------------------------------------------------------
+-- Search
+--------------------------------------------------------------------------------
+
+--- Every reachable setting, flattened, each with the path that leads to it.
+--
+-- Built on demand and cached for the life of the page. Walking the tree costs a
+-- few milliseconds and the tree does not change while the page is open; caching
+-- it means typing stays instant no matter how deep the menu goes.
+--
+-- The PATH is the point, not a by-product. The complaint that led to this was
+-- not "I cannot find the lock screen" -- it was "I found it and could not
+-- remember how". A result that jumps you there teaches nothing; one that says
+-- Appearance > Lock screen is a route you can walk yourself next time.
+function KindleUISettings:_searchIndex()
+    if self._search_index then return self._search_index end
+    local index = {}
+    local seen = {}
+
+    local function label(entry)
+        if type(entry.text) == "string" then return entry.text end
+        if entry.text_func then
+            local ok, t = pcall(entry.text_func)
+            if ok and type(t) == "string" then return t end
+        end
+        return nil
+    end
+
+    local function walk(list, trail, depth)
+        -- Same guards indexById needs, and for the same reason: a plugin may
+        -- point a sub_item_table back at an ancestor, and a stack overflow
+        -- inside a search box is a worse outcome than a missing result.
+        if depth > 12 or seen[list] then return end
+        seen[list] = true
+        for _idx, entry in ipairs(list) do
+            if type(entry) == "table" then
+                local text = label(entry)
+                if text and text ~= "" then
+                    local sub = entry.sub_item_table
+                    if not sub and entry.sub_item_table_func then
+                        local ok, t = pcall(entry.sub_item_table_func)
+                        if ok then sub = t end
+                    end
+                    if type(sub) == "table" then
+                        -- A branch is worth indexing too: "Appearance" is a
+                        -- thing somebody searches for.
+                        index[#index + 1] = { text = text, trail = trail, entry = entry, branch = true }
+                        local next_trail = trail == "" and text or (trail .. "  \u{203A}  " .. text)
+                        walk(sub, next_trail, depth + 1)
+                    else
+                        index[#index + 1] = { text = text, trail = trail, entry = entry }
+                    end
+                end
+            end
+        end
+    end
+
+    -- From the GROUPS, not from KOReader's raw tabs, so a result's path is the
+    -- route through this page rather than through a menu the reader is being
+    -- steered away from.
+    for _i, spec in ipairs(groupSpecs()) do
+        if not spec.needs or (self.menu_index and self.menu_index[spec.needs]) then
+            local children = self.menu_index and collect(self.menu_index, spec.refs) or {}
+            if #children > 0 then
+                walk(children, spec.title, 1)
+            end
+        end
+    end
+
+    self._search_index = index
+    return index
+end
+
+--- Case- and accent-insensitive contains.
+--
+-- Lua patterns are avoided entirely: a reader typing "(" or "%" into a search
+-- box would otherwise get a pattern error rather than no results, and `plain`
+-- find is both safer and faster.
+local function matches(haystack, needle)
+    return haystack:lower():find(needle:lower(), 1, true) ~= nil
+end
+
+function KindleUISettings:showSearch()
+    local InputDialog = require("ui/widget/inputdialog")
+    local dialog
+    dialog = InputDialog:new{
+        title = _("Search settings"),
+        input = self._last_query or "",
+        input_hint = _("lock screen"),
+        buttons = { {
+            { text = _("Cancel"), id = "close",
+              callback = function() UIManager:close(dialog) end },
+            {
+                text = _("Search"),
+                is_enter_default = true,
+                callback = function()
+                    local q = (dialog:getInputText() or ""):gsub("^%s+", ""):gsub("%s+$", "")
+                    UIManager:close(dialog)
+                    if q == "" then return end
+                    self._last_query = q
+                    self:_showSearchResults(q)
+                end,
+            },
+        } },
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
+function KindleUISettings:_showSearchResults(query)
+    local hits = {}
+    for _i, item in ipairs(self:_searchIndex()) do
+        if matches(item.text, query) then
+            hits[#hits + 1] = item
+        end
+    end
+
+    if #hits == 0 then
+        self:drillDown(T(_("No match for \u{201C}%1\u{201D}"), query), { {
+            text = _("Nothing found"),
+            post_text = _("Try a shorter word, or a word from the setting's own name."),
+        } }, true)
+        return
+    end
+
+    -- Branches first: somebody searching "appearance" wants the page, not the
+    -- seven rows inside it that happen to mention the word.
+    table.sort(hits, function(a, b)
+        if a.branch ~= b.branch then return a.branch == true end
+        return a.text:lower() < b.text:lower()
+    end)
+
+    local rows = {}
+    for _i, hit in ipairs(hits) do
+        local copy = {}
+        for k, v in pairs(hit.entry) do copy[k] = v end
+        copy.kindleui_src = hit.entry
+        -- The trail, in the place a second line goes. See _searchIndex.
+        copy.post_text = hit.trail ~= "" and hit.trail or nil
+        copy.bold = true
+        local icon = hit.entry.id and MENU_ICONS[hit.entry.id]
+        if icon then
+            copy.state = CenterContainer:new{
+                dimen = Geom:new{ w = self.glyph_col_w, h = Layout.y(REF.icon_h) },
+                TextWidget:new{ text = icon, face = self.face_row_glyph, padding = 0 },
+            }
+        end
+        rows[#rows + 1] = copy
+    end
+
+    self:drillDown(T(_("%1 for \u{201C}%2\u{201D}"), #hits, query), rows, true)
 end
 
 --- TouchMenu's close: it calls close_callback (touchmenu.lua:949-951). Callbacks
@@ -707,7 +1204,12 @@ function KindleUISettings:onMenuSelect(item)
     end
     if enabled == false then return true end
 
-    -- One of the eight grouping rows, or a tab on the overflow page. Either way
+    if item.kindleui_all_settings then
+        self:showAllSettings()
+        return true
+    end
+
+    -- One of the grouping rows, or a tab on the All settings page. Either way
     -- the contents are KOReader's own entries and need decorating.
     if item.kindleui_sub then
         self:drillDown(item.kindleui_title or item.text, item.kindleui_sub)
