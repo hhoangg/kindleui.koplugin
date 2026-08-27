@@ -339,6 +339,39 @@ function Placeholders.fetch(book, done, on_progress)
     return true
 end
 
+-- ── Moves ───────────────────────────────────────────────────────────────────
+--
+-- A sync plugin needs to know when the reader re-files a book, and it cannot
+-- find out on its own: bookshelf moves with `os.rename` -- one syscall, 18x
+-- faster than fork+exec of /bin/mv -- so KOReader's own FileManager:moveFile is
+-- never called and a patch on it never fires. That was the actual bug: the move
+-- worked, and the book kept a placeholder in its old folder until the next
+-- sync, because nothing had told anybody.
+--
+-- kindleui does not know what a sync is. It knows a book moved, and says so.
+
+local _move_observer = nil
+
+--- Register a function called after a book is moved on disk, or nil to remove.
+--
+-- `fn(from_abs, to_abs)` with absolute paths, both files. Called after the move
+-- has already succeeded, so it cannot prevent one -- and must not try to: the
+-- filesystem has moved on, and an observer that fails is a bookkeeping problem,
+-- never a reason to leave a half-moved library.
+function Placeholders.setMoveObserver(fn)
+    _move_observer = (type(fn) == "function") and fn or nil
+end
+
+--- Tell the observer a book moved. Never raises.
+function Placeholders.notifyMoved(from_abs, to_abs)
+    if not _move_observer then return end
+    local ok, err = pcall(_move_observer, from_abs, to_abs)
+    if not ok then
+        local ok_log, logger = pcall(require, "logger")
+        if ok_log then logger.warn("[bookshelf] move observer failed:", tostring(err)) end
+    end
+end
+
 Placeholders.MARK = MARK
 
 return Placeholders

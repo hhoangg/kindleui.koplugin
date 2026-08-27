@@ -403,6 +403,16 @@ function FileOps.moveBook(old_path, new_path, batch)
         return nil, "error"
     end
     _fixupBook(old_path, new_path, batch)
+    -- Tell anything that tracks where books live. bookshelf moves with
+    -- os.rename, so KOReader's FileManager:moveFile is never called and a patch
+    -- on it never fires -- which is why a sync plugin could not see this
+    -- happen and left a placeholder in the old folder until the next sync.
+    --
+    -- pcall-required and never fatal: a move that already happened on disk is
+    -- not undone by a bookkeeping failure.
+    pcall(function()
+        require("lib/bookshelf_placeholders").notifyMoved(old_path, new_path)
+    end)
     return true
 end
 
