@@ -222,6 +222,12 @@ function LockScreen:init()
     self.show_lunar = G_reader_settings:nilOrTrue("kindleui_lock_lunar")
     self.show_quote = G_reader_settings:nilOrTrue("kindleui_lock_quote")
 
+    -- Where the block sits, as one of nine cells. Bottom-left is Kindle's own
+    -- and stays the default. Anything unrecognised falls back to it rather than
+    -- erroring: this runs inside a screensaver paint, where a raised error is a
+    -- device that looks bricked until the next power cycle.
+    self.pos = G_reader_settings:readSetting("kindleui_lock_pos") or "bottom-left"
+
     -- Each entry is { w = TextWidget, x, y, h }, positioned relative to the
     -- paint origin. Painting is a flat walk of this list; there is no container
     -- hierarchy because nothing here needs one and a VerticalGroup would give
@@ -370,17 +376,52 @@ function LockScreen:_computeBands()
         total_h = total_h + Layout.y(self.items[i].gap) + self.items[i].h
     end
 
-    -- Bottom-left: the standard side margin, sitting REF_BOTTOM_GAP above the
-    -- bottom edge. Fixed, not centred - a block that moves with the length of
-    -- the quote reads as a layout bug on a screen you glance at.
-    local block_bottom = Screen:getHeight() - Layout.y(REF_BOTTOM_GAP)
-    local y = block_bottom - total_h
+    -- One of nine cells. The inset is REF_BOTTOM_GAP on whichever edge the
+    -- block is anchored to, so top-left is the mirror of bottom-left rather
+    -- than something that merely looks close to it.
+    --
+    -- The vertical anchor is applied to the WHOLE block, never per line: with a
+    -- middle anchor the block would otherwise grow up and down around its own
+    -- centre as the quote changes length, and a block that moves day to day on
+    -- a screen you only glance at reads as a layout bug.
+    local vert, horiz = tostring(self.pos):match("^(%a+)%-(%a+)$")
+    local inset = Layout.y(REF_BOTTOM_GAP)
+    local screen_h, screen_w = Screen:getHeight(), Screen:getWidth()
+
+    local y
+    if vert == "top" then
+        y = inset
+    elseif vert == "middle" then
+        y = math.floor((screen_h - total_h) / 2)
+    else -- "bottom", and any unparsed value
+        y = screen_h - inset - total_h
+    end
+    -- A block taller than the screen would otherwise start above the top edge
+    -- and lose its first line off-screen entirely.
+    if y < inset then y = inset end
     local top = y
+    -- The bottom edge of the block. Derived from the anchor rather than from the
+    -- screen, which is what the three refresh rects below measure down to.
+    local block_bottom = top + total_h
+
+    -- Horizontal alignment IS per line, unlike the vertical anchor. These are
+    -- separate text widgets of very different widths -- a 156px clock over a
+    -- 32px quote -- and aligning the block as one rect would leave every short
+    -- line hanging off the left of the longest one.
+    local function itemX(item)
+        local w = item.w:getSize().w
+        if horiz == "center" then
+            return math.floor((screen_w - w) / 2)
+        elseif horiz == "right" then
+            return screen_w - self.margin - w
+        end
+        return self.margin
+    end
 
     for i = 1, #self.items do
         local item = self.items[i]
         y = y + Layout.y(item.gap)
-        item.x, item.y = self.margin, y
+        item.x, item.y = itemX(item), y
         y = y + item.h
     end
 
