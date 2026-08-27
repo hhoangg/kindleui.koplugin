@@ -49,6 +49,7 @@ local LineWidget = require("ui/widget/linewidget")
 local NetworkMgr = require("ui/network/manager")
 local Size = require("ui/size")
 local Slider = require("kindleui_slider")
+local TaskCard = require("kindleui_taskcard")
 local TextWidget = require("ui/widget/textwidget")
 local TopContainer = require("ui/widget/container/topcontainer")
 local UIManager = require("ui/uimanager")
@@ -101,6 +102,9 @@ local REF_DISC_LABEL_H = 32
 local REF_DISC_GAP     = 14   -- between a disc and its label
 local REF_SECTION_GAP  = 44
 local REF_ROW_GAP      = 28
+local REF_TASK_TITLE_H = 30
+local REF_TASK_SUB_H   = 25
+local REF_TASK_CLOSE_H = 44
 local REF_CHEVRON_H    = 56
 -- Distance from the last control to the chevron, measured off the firmware's own
 -- panel: the warmth slider ends around y=1105 and the chevron sits near y=1245.
@@ -274,6 +278,11 @@ function ControlCentre:init()
     self.face_disc_glyph = faceFor(REF_DISC_GLYPH_H)
     self.face_disc_label = faceFor(REF_DISC_LABEL_H)
     self.face_chevron = faceFor(REF_CHEVRON_H)
+    -- The task card's three sizes, derived here so they scale with the panel
+    -- like everything else rather than being fixed points.
+    self.face_task_title = faceFor(REF_TASK_TITLE_H)
+    self.face_task_sub   = faceFor(REF_TASK_SUB_H)
+    self.face_task_close = faceFor(REF_TASK_CLOSE_H)
 
     -- Mirrors ConfigDialog (configdialog.lua:877): a screen-wide tap range whose
     -- handler decides whether the point fell outside the frame.
@@ -633,6 +642,20 @@ function ControlCentre:update()
         table.insert(items, slider)
     end
 
+    -- Background work, BELOW the sliders. Above them it would push the controls
+    -- the panel exists for down the screen every time a job ran; below, the
+    -- panel a reader knows stays where they know it and the card appears in the
+    -- slack at the bottom.
+    local card = TaskCard.build(self.inner_w, {
+        title = self.face_task_title,
+        sub   = self.face_task_sub,
+        close = self.face_task_close,
+    }, function() self:rebuild() end)
+    if card then
+        table.insert(items, VerticalSpan:new{ width = Layout.y(REF_ROW_GAP) })
+        table.insert(items, card)
+    end
+
     local chevron = Tappable:new{
         on_tap = function() UIManager:close(self) end,
         CenterContainer:new{
@@ -728,7 +751,49 @@ function ControlCentre:paintTo(bb, x, y)
     self.dimen.x, self.dimen.y = x, y
 end
 
+--- Repaint the panel once a second while a background job is running.
+--
+-- Only while the panel is OPEN, and only while something is actually moving:
+-- the point of a background job is that it costs nothing when nobody is
+-- looking, and a timer that survives the panel would spend a wakeup a second
+-- redrawing a widget that is not on screen -- on a device where that is
+-- battery.
+--
+-- The e-ink cost is why it is one second and not faster. Each tick is a real
+-- partial refresh of the card's rectangle; at four a second the panel would
+-- visibly churn and the figures would be no more useful.
+function ControlCentre:_scheduleTick()
+    self:_cancelTick()
+    if not TaskCard.isLive() then return end
+    self._tick = function()
+        if not TaskCard.isLive() then
+            -- One last repaint so the card settles on its finished state
+            -- instead of freezing mid-progress.
+            self:rebuild()
+            self._tick = nil
+            return
+        end
+        self:rebuild()
+        UIManager:scheduleIn(1, self._tick)
+    end
+    UIManager:scheduleIn(1, self._tick)
+end
+
+function ControlCentre:_cancelTick()
+    if self._tick then
+        UIManager:unschedule(self._tick)
+        self._tick = nil
+    end
+end
+
+function ControlCentre:onShow()
+    self:_scheduleTick()
+end
+
 function ControlCentre:onCloseWidget()
+    -- The timer must not outlive the panel: it repaints self.dimen, and after a
+    -- close that rectangle belongs to the document underneath.
+    self:_cancelTick()
     -- Same reasoning as ConfigDialog:onCloseWidget (configdialog.lua:955): the
     -- widgets underneath have to be redrawn where we were, and nowhere else.
     UIManager:setDirty(nil, "ui", self.dimen)
