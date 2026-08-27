@@ -52,17 +52,19 @@ Restart KOReader — plugins load only at startup. Settings live under
 
 ## Screens
 
-**Control centre** (`kindleui_controlcentre.lua`) — device name, battery, clock,
-five circular toggles in a 3+2 grid, brightness and warmth sliders. Labels read
+**Control centre** (`kindleui_controlcentre.lua`) — battery, clock,
+four circular toggles in one row, brightness and warmth sliders. Labels read
 the *state* for toggles (`On`/`Off`) and the *name* for actions.
 
-Kindle's own panel puts **Bluetooth** in the third slot. This one puts
-**Rotate** there instead. The hardware is not the problem — a Paperwhite has a
-working Bluetooth radio and pairs headphones under stock firmware — but KOReader
-has no Bluetooth API at all: there is not one reference to it anywhere in
-`frontend/` or `plugins/`. Reaching the radio would mean driving Amazon's own
-undocumented daemon over lipc, and a disc that *looks* live but is not is worse
-than one that admits it. So the slot holds something that works.
+**Wi-Fi, Dark Mode, Sync, All Settings** — and the list is short on purpose.
+Kindle's own panel carries Airplane and Bluetooth as well, and neither survives
+contact with KOReader. There is no Bluetooth API at all: not one reference in
+`frontend/` or `plugins/`, on any platform, so the disc could only ever have
+been decorative. Airplane mode is worse in a subtler way — KOReader has exactly
+one radio and no notion of airplane mode, so the disc was really the Wi-Fi
+toggle wearing an inverted caption, where *On* meant the radio was *off*. Two
+names for one switch, pointing opposite ways. The row now holds only controls
+that do what they say.
 
 **Reading toolbar** (`kindleui_toolbar.lua`) — back/Home, `Aa`, contents,
 notebook, search, overflow across the top; chapter title, position, time left
