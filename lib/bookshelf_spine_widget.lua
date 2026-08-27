@@ -1379,6 +1379,47 @@ function SpineWidget:_renderShadowedCard(inner)
         children[#children + 1] = badge
     end
 
+    -- Downloading pill (top-right): shown while a placeholder is being
+    -- fetched, replacing what used to be a full-screen message.
+    --
+    -- On the card rather than in the middle of the screen because the reader
+    -- tapped a specific book: the answer to "is it working?" belongs where they
+    -- looked, and a modal over the shelf hides the seven other books while
+    -- saying nothing the card could not.
+    --
+    -- Same pill geometry as the series-number badge above, deliberately -- one
+    -- badge shape on the shelf rather than a second invention.
+    if self.book and self.book.is_downloading then
+        local TextWidget = require("ui/widget/textwidget")
+        local colors     = CoverProgress.resolvedColors()
+        local frac       = tonumber(self.book.is_downloading)
+        -- "⬇" alone until a fraction arrives. A percentage that sits at 0
+        -- while a connection is negotiated reads as stalled, whereas the bare
+        -- arrow reads as starting.
+        local label = frac and string.format("%d%%", math.floor(frac * 100 + 0.5))
+                            or "\xE2\xAC\x87"
+        local dl_face, dl_bold = BFont:getFace("smallinfofont", _badgeSize(12), { bold = true })
+        local pill = ColorSafeFrame:new{
+            bordersize     = Size.border.thin,
+            background     = colors.badge_bg,
+            color          = colors.border,
+            radius         = Screen:scaleBySize(3),
+            padding_left   = Size.padding.default,
+            padding_right  = Size.padding.default,
+            padding_top    = Size.padding.small,
+            padding_bottom = Size.padding.small,
+            TextWidget:new{
+                text = label, face = dl_face, bold = dl_bold,
+                fgcolor = colors.badge_fg,
+            },
+        }
+        local pill_w = pill:getSize().w
+        local pill_x = math.max(0, math.min(self.width - pill_w,
+                           card_w - math.floor(pill_w / 2)))
+        pill.overlap_offset = { pill_x, -SHADOW_OFFSET }
+        children[#children + 1] = pill
+    end
+
     -- Favourites star (top-left): same halo'd-glyph treatment as the
     -- bookmark-check on the bottom-left, but mirrored to the top edge so
     -- the two indicators (in-progress / finished bookmark below, favourite

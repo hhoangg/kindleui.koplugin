@@ -159,6 +159,7 @@ end
 
 local function reset()
     Placeholders.setProvider(nil)
+    Placeholders.setOpener(nil)
     Placeholders.setFolderProvider(nil)
     Repo.invalidateWalkCache()
     Repo.invalidateAllCache()
@@ -456,6 +457,104 @@ test("folder provider: one that throws leaves the listing intact", function()
     local items, total = Repo.getAll("/lib", 10, 0)
     assert(total == 2, "the two real books must still list, got " .. tostring(total))
     assert(#foldersOf(items) == 0)
+end)
+
+-- ============================================================================
+-- Download state
+--
+-- The pill on the card is driven from module state, not from a flag on a book
+-- record: records are thrown away and rebuilt on every repaint, which is
+-- exactly when the pill has to be drawn.
+-- ============================================================================
+
+test("buildRecord stamps is_downloading from module state", function()
+    reset()
+    local shape = { fp = "/lib/a.xtph-bok_5.epub", ph = { id = "bok_5", name = "a.epub" } }
+    assert(Placeholders.buildRecord(shape).is_downloading == nil,
+        "a record must not claim to be downloading by default")
+    Placeholders.markDownloading("bok_5", true)
+    assert(Placeholders.buildRecord(shape).is_downloading == true,
+        "a REBUILT record must pick the state up -- this is the whole point")
+    Placeholders.markDownloading("bok_5", 0.42)
+    assert(Placeholders.buildRecord(shape).is_downloading == 0.42,
+        "a fraction must survive to the renderer")
+    Placeholders.markDownloading("bok_5", nil)
+    assert(Placeholders.buildRecord(shape).is_downloading == nil, "clearing must clear")
+end)
+
+test("fetch marks on the way in and clears on the way out", function()
+    reset()
+    local seen_during
+    Placeholders.setOpener(function(book, done)
+        seen_during = Placeholders.downloadingState(book.placeholder_id)
+        done("/lib/real.epub")
+    end)
+    local book = { placeholder_id = "bok_6" }
+    local landed
+    Placeholders.fetch(book, function(path) landed = path end)
+    assert(seen_during == true, "must be marked while the opener runs")
+    assert(landed == "/lib/real.epub", "the path must reach the caller")
+    assert(Placeholders.downloadingState("bok_6") == nil, "must be cleared afterwards")
+    assert(Placeholders.anyDownloading() == false)
+end)
+
+test("fetch clears the mark even when the opener throws", function()
+    reset()
+    Placeholders.setOpener(function() error("network on fire") end)
+    local err_seen
+    Placeholders.fetch({ placeholder_id = "bok_7" }, function(_p, e) err_seen = e end)
+    assert(err_seen ~= nil, "the failure must be reported")
+    assert(Placeholders.downloadingState("bok_7") == nil,
+        "a card must not be left spinning forever by an opener that died")
+end)
+
+test("fetch clears the mark on a plain failure too", function()
+    reset()
+    Placeholders.setOpener(function(_b, done) done(nil, "no route to host") end)
+    Placeholders.fetch({ placeholder_id = "bok_8" }, function() end)
+    assert(Placeholders.downloadingState("bok_8") == nil)
+end)
+
+test("progress is clamped and forwarded", function()
+    reset()
+    local got = {}
+    Placeholders.setOpener(function(_b, _done, progress)
+        progress(-1); progress(0.5); progress(9)
+    end)
+    Placeholders.fetch({ placeholder_id = "bok_9" }, function() end,
+                       function(f) got[#got + 1] = f end)
+    assert(table.concat(got, ",") == "0,0.5,1",
+        "expected 0,0.5,1 got " .. table.concat(got, ","))
+end)
+
+test("done is honoured once, however many times the opener calls it", function()
+    reset()
+    Placeholders.setOpener(function(_b, done)
+        done("/first.epub"); done("/second.epub")
+    end)
+    local calls = {}
+    Placeholders.fetch({ placeholder_id = "bok_10" }, function(p) calls[#calls + 1] = p end)
+    assert(#calls == 1 and calls[1] == "/first.epub",
+        "a second done would open the book on top of itself; got " .. #calls .. " calls")
+end)
+
+test("progress after done is ignored", function()
+    reset()
+    local after
+    Placeholders.setOpener(function(_b, done, progress)
+        done("/done.epub")
+        progress(0.9)
+        after = Placeholders.downloadingState("bok_11")
+    end)
+    Placeholders.fetch({ placeholder_id = "bok_11" }, function() end)
+    assert(after == nil,
+        "a late progress call must not re-mark a finished download, got " .. tostring(after))
+end)
+
+test("fetch reports false when no opener is registered", function()
+    reset()
+    assert(Placeholders.fetch({ placeholder_id = "x" }, function() end) == false,
+        "the caller needs to know nobody can fetch, to say so")
 end)
 
 reset()

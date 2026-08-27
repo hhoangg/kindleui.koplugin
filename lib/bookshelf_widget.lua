@@ -3405,17 +3405,29 @@ function BookshelfWidget:_fetchPlaceholder(book, after_open_callback)
         return
     end
 
-    -- Held open until the callback fires. The download is a network round trip
-    -- on a device whose Wi-Fi may still be coming up, so it is not instant and
-    -- an un-acknowledged tap reads as a dead tile.
-    local progress = InfoMessage:new{
-        text = T(_("Downloading %1…"), book.title or book.filename or "?"),
-    }
-    UIManager:show(progress)
+    -- Feedback goes on the CARD, not over the shelf. The reader tapped one
+    -- specific book, so the answer to "is it working?" belongs where they
+    -- looked; a modal in the middle covers the other seven books to say
+    -- something the card can say itself.
+    --
+    -- Placeholders.fetch has already marked the id, and buildRecord stamps
+    -- is_downloading onto every record it makes from here on, so a rebuild is
+    -- all it takes to show the pill.
+    --
+    -- Repaints are THROTTLED to whole percent steps of 10. Each one is a
+    -- full-shelf rebuild on e-ink, and a rebuild per network chunk would both
+    -- swamp the CPU and leave the panel ghosting -- a smooth progress bar is
+    -- not a thing this screen can draw, so asking for one costs the download.
+    local function repaint()
+        pcall(function() self:_rebuild() end)
+    end
+    local last_step = -1
 
     Placeholders.fetch(book, function(real_path, err)
-        UIManager:close(progress)
         if not real_path then
+            -- The mark is already cleared by fetch(); repaint so the pill goes
+            -- away rather than sitting on a card that is no longer downloading.
+            repaint()
             UIManager:show(InfoMessage:new{
                 text    = err and T(_("Could not download this book: %1"), tostring(err))
                               or _("Could not download this book."),
@@ -3440,6 +3452,15 @@ function BookshelfWidget:_fetchPlaceholder(book, after_open_callback)
         end
         local fresh = Repo.buildBook(real_path) or { filepath = real_path }
         self:_openBook(fresh, after_open_callback)
+    end, function(frac)
+        -- Whole 10% steps only. See the note above the repaint closure: on
+        -- e-ink a finer cadence buys ghosting and a slower download, not a
+        -- smoother bar.
+        local step = frac and math.floor(frac * 10) or -1
+        if step > last_step then
+            last_step = step
+            repaint()
+        end
     end)
 end
 

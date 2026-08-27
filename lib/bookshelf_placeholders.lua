@@ -51,6 +51,41 @@ local MARK = ".xtph-"
 -- entry came from where, and neither would own the download.
 local _provider = nil
 
+-- Placeholder ids currently being fetched, mapped to a 0..1 fraction (or true
+-- before any progress has been reported).
+--
+-- Module state rather than something the caller holds, because the book RECORDS
+-- do not survive: every shelf rebuild throws them away and asks the repository
+-- for fresh ones. A flag written onto a record would be gone the moment the
+-- shelf repainted -- which is exactly when it needs to be read. Keyed on the id
+-- so buildRecord can stamp it onto each new record as it is made.
+--
+-- Declared HERE, above buildRecord, and not down with the fetch functions that
+-- write it: a local declared after the function that reads it is not an upvalue
+-- at all, it is a global lookup that answers nil, and Lua says nothing until
+-- the line runs.
+local _downloading = {}
+
+--- Mark a placeholder as being fetched, or clear it.
+-- `state` may be false/nil to clear, true to mark, or a 0..1 fraction.
+function Placeholders.markDownloading(id, state)
+    if id == nil then return end
+    if state == nil or state == false then
+        _downloading[id] = nil
+    else
+        _downloading[id] = state
+    end
+end
+
+--- The fetch state of one placeholder: nil, true, or a 0..1 fraction.
+function Placeholders.downloadingState(id)
+    return id ~= nil and _downloading[id] or nil
+end
+
+function Placeholders.anyDownloading()
+    return next(_downloading) ~= nil
+end
+
 --- Register the source of placeholder entries, or nil to remove it.
 --
 -- `fn(path)` is called with an absolute directory path and must return an array
@@ -172,6 +207,9 @@ function Placeholders.buildRecord(shape)
         -- Identity for the tap handler, and the flag every renderer checks.
         is_placeholder = true,
         placeholder_id = m.id,
+        -- Stamped fresh on every rebuild from module state, so a card that is
+        -- mid-download keeps saying so across repaints.
+        is_downloading = m.id ~= nil and _downloading[m.id] or nil,
         -- Size is known from the manifest even though the bytes are not here,
         -- so the size column can say how big the download will be.
         size           = m.size,
@@ -239,13 +277,19 @@ end
 
 local _opener = nil
 
+
 --- Register what to do when the reader taps a placeholder, or nil to remove it.
 --
--- `fn(book, done)` receives the book record `buildRecord` produced (so
--- `placeholder_id` and `filepath` are both on it) and MUST call
+-- `fn(book, done, progress)` receives the book record `buildRecord` produced
+-- (so `placeholder_id` and `filepath` are both on it) and MUST call
 -- `done(real_path_or_nil, err_message_or_nil)` exactly once, whenever the
 -- download finishes or fails. It may return immediately and call `done` later
 -- -- the caller shows its own progress and does not block.
+--
+-- `progress(fraction)` is optional to call and takes 0..1. Whatever the opener
+-- reports is shown on the book's own card; the opener must NOT put a message
+-- on screen itself, or the reader gets two progress indicators for one
+-- download, one of them covering the shelf.
 function Placeholders.setOpener(fn)
     _opener = (type(fn) == "function") and fn or nil
 end
@@ -259,15 +303,32 @@ end
 -- `done` is guaranteed to be called at most once even if the opener calls it
 -- twice: a second call arriving after the caller has already re-rendered would
 -- open the book a second time on top of itself.
-function Placeholders.fetch(book, done)
+-- `on_progress(fraction)` is optional and is invoked by the opener as bytes
+-- arrive. It is called on the caller's behalf AFTER the module state is
+-- updated, so a repaint triggered from it sees the new figure.
+function Placeholders.fetch(book, done, on_progress)
     if not _opener or type(book) ~= "table" then return false end
+    local id = book.placeholder_id
+    Placeholders.markDownloading(id, true)
     local fired = false
     local function once(path, err)
         if fired then return end
         fired = true
+        -- Cleared here rather than by the opener, so an opener that forgets --
+        -- or dies partway -- cannot leave a card spinning forever.
+        Placeholders.markDownloading(id, nil)
         if type(done) == "function" then done(path, err) end
     end
-    local ok, err = pcall(_opener, book, once)
+    local function progress(frac)
+        if fired then return end
+        local f = tonumber(frac)
+        if f then
+            if f < 0 then f = 0 elseif f > 1 then f = 1 end
+            _downloading[id] = f
+        end
+        if type(on_progress) == "function" then pcall(on_progress, f) end
+    end
+    local ok, err = pcall(_opener, book, once, progress)
     if not ok then
         local ok_log, logger = pcall(require, "logger")
         if ok_log then
