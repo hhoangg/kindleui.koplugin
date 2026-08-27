@@ -77,6 +77,59 @@ end
 -- narrower than upstream paintTo: drops stripe/invert/dim/inner_bordersize
 -- and the focus-border swap, since nothing in this file uses them on a
 -- ColorSafeFrame; add them here first if a future call site needs one.
+-- Dashed variant of the border above, for the one card that must read as an
+-- absence rather than an object: a book the account holds but this device has
+-- not downloaded.
+--
+-- Dashes are painted as plain rects rather than by asking Blitbuffer for a
+-- dashed border, because it has no such call. Corners are drawn solid: a dash
+-- pattern that happens to land its "off" phase on a corner leaves the card
+-- looking chipped, and the eye reads a broken corner as a rendering fault
+-- rather than a style.
+--
+-- e-ink is why this exists at all. Distinguishing a placeholder by TONE alone
+-- fails on a 16-level greyscale panel -- a light grey card and a dark cover
+-- both dither, and after a partial refresh the ghost of the previous page sits
+-- on top. A dashed edge is a shape, and shape survives what tone does not.
+local function _paintDashedBorder(bb, x, y, w, h, bw, color, dash_on, dash_off)
+    if not color or not bw or bw <= 0 or w <= 0 or h <= 0 then return end
+    dash_on  = math.max(1, dash_on or 1)
+    dash_off = math.max(1, dash_off or 1)
+    local step = dash_on + dash_off
+    local corner = math.min(dash_on, math.floor(math.min(w, h) / 4))
+
+    -- Corners first, so a dash run that ends mid-phase cannot leave one bare.
+    if corner > 0 then
+        bb:paintRect(x, y, corner, bw, color)
+        bb:paintRect(x, y, bw, corner, color)
+        bb:paintRect(x + w - corner, y, corner, bw, color)
+        bb:paintRect(x + w - bw, y, bw, corner, color)
+        bb:paintRect(x, y + h - bw, corner, bw, color)
+        bb:paintRect(x, y + h - corner, bw, corner, color)
+        bb:paintRect(x + w - corner, y + h - bw, corner, bw, color)
+        bb:paintRect(x + w - bw, y + h - corner, bw, corner, color)
+    end
+
+    local px = x + corner
+    while px < x + w - corner do
+        local run = math.min(dash_on, x + w - corner - px)
+        if run > 0 then
+            bb:paintRect(px, y, run, bw, color)
+            bb:paintRect(px, y + h - bw, run, bw, color)
+        end
+        px = px + step
+    end
+    local py = y + corner
+    while py < y + h - corner do
+        local run = math.min(dash_on, y + h - corner - py)
+        if run > 0 then
+            bb:paintRect(x, py, bw, run, color)
+            bb:paintRect(x + w - bw, py, bw, run, color)
+        end
+        py = py + step
+    end
+end
+
 local ColorSafeFrame = FrameContainer:extend{}
 
 function ColorSafeFrame:paintTo(bb, x, y)
@@ -102,10 +155,19 @@ function ColorSafeFrame:paintTo(bb, x, y)
         paintRoundedRect(bb, x, y, container_width, container_height, self.background, radius)
     end
     if self.bordersize > 0 then
-        local anti_alias = G_reader_settings:nilOrTrue("anti_alias_ui")
-        _paintColorSafeBorder(bb, x + self.margin, y + self.margin,
-            container_width - self.margin * 2, container_height - self.margin * 2,
-            self.bordersize, self.color, self.radius, anti_alias)
+        if self.dashed then
+            -- Squared off on purpose: the dash painter walks straight edges, so
+            -- a radius here would draw dashes across a corner the background
+            -- has already rounded away.
+            _paintDashedBorder(bb, x + self.margin, y + self.margin,
+                container_width - self.margin * 2, container_height - self.margin * 2,
+                self.bordersize, self.color, self.dash_on, self.dash_off)
+        else
+            local anti_alias = G_reader_settings:nilOrTrue("anti_alias_ui")
+            _paintColorSafeBorder(bb, x + self.margin, y + self.margin,
+                container_width - self.margin * 2, container_height - self.margin * 2,
+                self.bordersize, self.color, self.radius, anti_alias)
+        end
     end
     if self[1] then
         self[1]:paintTo(bb,
@@ -173,6 +235,21 @@ local function _fallbackBgs()
         return FALLBACK_OUTER_BG_NIGHT, FALLBACK_INNER_BG_NIGHT
     end
     return FALLBACK_OUTER_BG_DAY, FALLBACK_INNER_BG_DAY
+end
+
+-- A book that is on the account but not on this device. Deliberately only a
+-- LITTLE greyer than the ordinary no-cover card: the dashed border and the
+-- download motif carry the meaning, and pushing the tone far enough to carry it
+-- alone would make the title unreadable on a 16-level panel.
+local PLACEHOLDER_OUTER_BG_DAY   = Blitbuffer.gray(0.16)
+local PLACEHOLDER_INNER_BG_DAY   = Blitbuffer.gray(0.06)
+local PLACEHOLDER_OUTER_BG_NIGHT = Blitbuffer.gray(0.20)
+local PLACEHOLDER_INNER_BG_NIGHT = Blitbuffer.gray(0.24)
+local function _placeholderBgs()
+    if G_reader_settings:isTrue("night_mode") then
+        return PLACEHOLDER_OUTER_BG_NIGHT, PLACEHOLDER_INNER_BG_NIGHT
+    end
+    return PLACEHOLDER_OUTER_BG_DAY, PLACEHOLDER_INNER_BG_DAY
 end
 
 -- Glyph sizing for the in-progress / finished badge on covers.
@@ -1861,7 +1938,20 @@ function SpineWidget:_renderFallback()
     local card_w, card_h = self:_cardDimensions()
     local border = CARD_BORDER
     local colors = CoverProgress.resolvedColors()
+    -- `not_here` is a book the account holds that this device has not
+    -- downloaded. It reuses this card wholesale -- there is no artwork for it
+    -- either -- and differs in exactly three ways: a greyer paper tone, a
+    -- dashed outer edge, and a download arrow where the diamond sits.
+    local not_here = (self.book and self.book.is_placeholder) or false
     local outer_bg, inner_bg = _fallbackBgs()
+    if not_here then outer_bg, inner_bg = _placeholderBgs() end
+    -- Dash rhythm, scaled off the card so it looks the same at every grid
+    -- size rather than turning into a dotted line on a six-column shelf.
+    -- Floored at 2px: a 1px gap disappears into e-ink's own dithering, and a
+    -- dashed border that reads as solid is worse than no dash at all, because
+    -- it costs the paint and communicates nothing.
+    local dash_on  = math.max(Screen:scaleBySize(4), math.floor(card_w * 0.045))
+    local dash_off = math.max(2, math.floor(dash_on * 0.7))
 
     -- Vintage-cover layout. Outer card paints a paper-tone background +
     -- thin border (matches the cover-render path so adjacent shelves
@@ -1910,7 +2000,10 @@ function SpineWidget:_renderFallback()
         local plain = ColorSafeFrame:new{
             bordersize = border,
             color      = colors.border,
-            radius     = self.flat_thumb and 0 or CARD_RADIUS,
+            dashed     = not_here,
+            dash_on    = dash_on,
+            dash_off   = dash_off,
+            radius     = (self.flat_thumb or not_here) and 0 or CARD_RADIUS,
             padding    = 0,
             background = outer_bg,
             Widget:new{ dimen = Geom:new{
@@ -2062,6 +2155,13 @@ function SpineWidget:_renderFallback()
         local motif_char = "\xE2\x9D\x96"           -- ❖ U+2756 book diamond
         if self.book and (self.book.is_opds_nav or self.book.is_facet) then
             motif_char = "\xE2\x9D\xAF"              -- ❯ U+276F drill chevron
+        elseif not_here then
+            -- ⬇ U+2B07 DOWNWARDS BLACK ARROW. Chosen over the nerd-font
+            -- cloud glyphs the file uses elsewhere because it renders from
+            -- infofont, which is the face this motif band already loaded --
+            -- a second face here would be a second font fallback chain to go
+            -- wrong on a device, for a single arrow.
+            motif_char = "\xE2\xAC\x87"
         end
         motif = TextWidget:new{
             text    = motif_char,
@@ -2191,7 +2291,12 @@ function SpineWidget:_renderFallback()
     local card = ColorSafeFrame:new{
         bordersize = border,
         color      = colors.border,
-        radius     = self.flat_thumb and 0 or CARD_RADIUS,
+        -- The edge that actually carries "this book is not here". bareCard
+        -- above dashes for the same reason, so the two degenerate cases agree.
+        dashed     = not_here,
+        dash_on    = dash_on,
+        dash_off   = dash_off,
+        radius     = (self.flat_thumb or not_here) and 0 or CARD_RADIUS,
         padding    = 0,
         background = outer_bg,
         VerticalGroup:new{

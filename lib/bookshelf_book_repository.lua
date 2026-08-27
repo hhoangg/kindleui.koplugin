@@ -12,6 +12,7 @@ local Repo = {}
 local logger = require("logger")
 local Filter = require("lib/bookshelf_filter")
 local BookshelfSettings = require("lib/bookshelf_settings_store")
+local Placeholders = require("lib/bookshelf_placeholders")
 local _ok = pcall(require, "lib/bookshelf_i18n")  -- soft: tests stub-load without it
 local i18n = package.loaded["lib/bookshelf_i18n"]
 local function tr(s) if i18n and i18n.gettext then return i18n.gettext(s) end; return s end
@@ -2850,6 +2851,8 @@ function Repo.getAll(path, limit, offset, sort_priority, filter, opts)
                 if shape.kind == "folder" then
                     out[#out + 1] = { kind = "folder", path = shape.path,
                                       label = shape.label, name = shape.label }
+                elseif shape.ph then
+                    out[#out + 1] = Placeholders.buildRecord(shape)
                 else
                     local b = _lightMetaForFp(light_cache, shape.fp)
                     out[#out + 1] = b or { fp = shape.fp, filepath = shape.fp }
@@ -2879,6 +2882,11 @@ function Repo.getAll(path, limit, offset, sort_priority, filter, opts)
                     label      = shape.label,
                     first_book = fb,
                 }
+            elseif shape.ph then
+                -- No file, so no BIM row and no cover to decode. The record is
+                -- built from what the provider said, and the cover cache is
+                -- never consulted for a path that cannot be in it.
+                out[#out + 1] = Placeholders.buildRecord(shape)
             else
                 local meta_opts
                 if ScaledCoverCache and ScaledCoverCache:has(shape.fp) then
@@ -2924,6 +2932,17 @@ function Repo.getAll(path, limit, offset, sort_priority, filter, opts)
         end
     end
 
+    -- Books the account holds that this device has not downloaded. They join
+    -- the listing HERE, as lfs-shaped records, so they sort, paginate and
+    -- filter as ordinary entries rather than being appended to a finished
+    -- page (which would put every one of them last and desync the total the
+    -- caller paginates against). Empty unless a sync plugin registered a
+    -- provider, so a stock install walks exactly the path it always did.
+    do
+        local ph_entries = Placeholders.entriesFor(path)
+        for _i, e in ipairs(ph_entries) do entries[#entries + 1] = e end
+    end
+
     -- Pre-fetch data required by the comparator before sorting so each
     -- comparison stays O(1). Derive needs from the effective priority
     -- (caller's or the "all" fallback, set up at the top of getAll) so
@@ -2966,7 +2985,11 @@ function Repo.getAll(path, limit, offset, sort_priority, filter, opts)
         local _pf_hits, _pf_misses = 0, 0
         local bim = getBookInfoMgr()
         for _i, e in ipairs(entries) do
-            if e.attr and e.attr.mode == "file" then
+            -- `e.ph` entries carry their title/authors/series from the sync
+            -- provider already. Asking BIM about a file that was never on this
+            -- device is a guaranteed miss, and the miss branch would overwrite
+            -- the provider's title with the pseudo-path's basename.
+            if e.attr and e.attr.mode == "file" and not e.ph then
                 local info
                 if light_cache then
                     local lc = light_cache[e.fp]
@@ -3099,7 +3122,10 @@ function Repo.getAll(path, limit, offset, sort_priority, filter, opts)
         -- a.rating / a.page_count, no underscore) so a sort by either
         -- actually reorders. Only written when that key is in the priority.
         for _i, e in ipairs(entries) do
-            if e.attr and e.attr.mode == "file" then
+            -- Skipped for placeholders: there is no sidecar for a book that was
+            -- never opened here, so _pct/_status stay nil and it sorts as
+            -- "never opened" -- which is exactly what it is.
+            if e.attr and e.attr.mode == "file" and not e.ph then
                 local pct, status, rating, page_count = Repo.readProgress(e.fp)
                 e._pct    = pct
                 e._status = status
@@ -3188,7 +3214,10 @@ function Repo.getAll(path, limit, offset, sort_priority, filter, opts)
     for _i, e in ipairs(ordered_entries) do
         if e.attr.mode == "file" then
             if _supportedExt(e.name) then
-                shapes[#shapes + 1] = { kind = "book", fp = e.fp }
+                -- `ph` rides along so hydration can build the record without a
+                -- file: it is nil for every real book, and its presence is the
+                -- only thing that distinguishes the two downstream.
+                shapes[#shapes + 1] = { kind = "book", fp = e.fp, ph = e.ph }
             end
         elseif e.attr.mode == "directory" then
             -- Omit folders that contain no supported book files at any depth.
@@ -3241,6 +3270,8 @@ function Repo.getAll(path, limit, offset, sort_priority, filter, opts)
             if shape.kind == "folder" then
                 out[#out + 1] = { kind = "folder", path = shape.path,
                                   label = shape.label, name = shape.label }
+            elseif shape.ph then
+                out[#out + 1] = Placeholders.buildRecord(shape)
             else
                 local b = _lightMetaForFp(light_cache, shape.fp)
                 out[#out + 1] = b or { fp = shape.fp, filepath = shape.fp }
@@ -3261,6 +3292,8 @@ function Repo.getAll(path, limit, offset, sort_priority, filter, opts)
                 label      = shape.label,
                 first_book = fb,
             }
+        elseif shape.ph then
+            out[#out + 1] = Placeholders.buildRecord(shape)
         else
             local b = _safeBuildBookMeta(shape.fp)
             if b then out[#out + 1] = b end
