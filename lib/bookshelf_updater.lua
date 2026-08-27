@@ -90,7 +90,7 @@ function Updater.composeBranchUrl(branch)
         return string.format("%%%02X", c:byte())
     end)
     return string.format(
-        "https://api.github.com/repos/AndyHazz/bookshelf.koplugin/zipball/%s",
+        "https://api.github.com/repos/hhoangg/kindleui.koplugin/zipball/%s",
         encoded)
 end
 
@@ -105,7 +105,7 @@ local function httpGetJSON(url, user_agent)
 end
 
 function Updater.offerReleasesPage(message)
-    local url = "https://github.com/AndyHazz/bookshelf.koplugin/releases"
+    local url = "https://github.com/hhoangg/kindleui.koplugin/releases"
     if Device:canOpenLink() then
         UIManager:show(ConfirmBox:new{
             text = message .. "\n\n" .. _("Open the releases page in a browser?"),
@@ -143,11 +143,11 @@ function Updater.checkBackground(on_update_found)
 
     UIManager:scheduleIn(0.1, function()
         local installed_version = Updater.getInstalledVersion()
-        local user_agent = "KOReader-Bookshelf/" .. installed_version
+        local user_agent = "KOReader-KindleUI/" .. installed_version
 
         -- Only fetch the latest release (lightweight)
         local release = httpGetJSON(
-            "https://api.github.com/repos/AndyHazz/bookshelf.koplugin/releases/latest",
+            "https://api.github.com/repos/hhoangg/kindleui.koplugin/releases/latest",
             user_agent)
 
         _check_in_flight = false
@@ -196,11 +196,11 @@ function Updater.check(on_success)
     })
 
     UIManager:scheduleIn(0.1, function()
-        local user_agent = "KOReader-Bookshelf/" .. installed_version
+        local user_agent = "KOReader-KindleUI/" .. installed_version
 
         -- Fetch all releases to gather notes between installed and latest
         local releases = httpGetJSON(
-            "https://api.github.com/repos/AndyHazz/bookshelf.koplugin/releases",
+            "https://api.github.com/repos/hhoangg/kindleui.koplugin/releases",
             user_agent)
         if not releases or #releases == 0 then
             Updater.offerReleasesPage(_("Could not check for updates."))
@@ -446,9 +446,9 @@ function Updater.installLatestStable(on_success)
 
     UIManager:scheduleIn(0.1, function()
         local installed_version = Updater.getInstalledVersion()
-        local user_agent = "KOReader-Bookshelf/" .. installed_version
+        local user_agent = "KOReader-KindleUI/" .. installed_version
         local release = httpGetJSON(
-            "https://api.github.com/repos/AndyHazz/bookshelf.koplugin/releases/latest",
+            "https://api.github.com/repos/hhoangg/kindleui.koplugin/releases/latest",
             user_agent)
         if not release or not release.tag_name or release.draft or release.prerelease then
             Updater.offerReleasesPage(_("Could not fetch latest release."))

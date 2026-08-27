@@ -23,5 +23,14 @@ return {
     description = _([[Kindle's interface for KOReader: a home screen you pick a book from, a control centre from the top edge, a reading toolbar, a page browser, a settings page and a lock screen.
 
 Forked from bookshelf.koplugin by AndyHazz, which is the home screen and the larger part of this.]]),
-    version = "4.3.5",
+    -- Four parts, and every one of them numeric on purpose.
+    --
+    -- The updater compares versions with `tonumber(part) or 0` over
+    -- dot-separated pieces (bookshelf_updater.lua:66), so anything non-numeric
+    -- silently becomes ZERO: "4.3.5-kindleui.1" parses as [4,3,0,1] and reads
+    -- as OLDER than upstream's 4.3.5, which would offer every user a downgrade.
+    --
+    -- So the fork's build number is a fourth numeric part. It says which
+    -- upstream release this is built on, and sorts above it.
+    version = "4.3.5.1",
 }

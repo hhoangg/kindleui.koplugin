@@ -47,7 +47,7 @@ local Updater = dofile("lib/bookshelf_updater.lua")
 local t = dofile("tests/_helpers.lua").runner()
 
 -- ── composeBranchUrl ────────────────────────────────────────────────────────
-local BASE = "https://api.github.com/repos/AndyHazz/bookshelf.koplugin/zipball/"
+local BASE = "https://api.github.com/repos/hhoangg/kindleui.koplugin/zipball/"
 
 t.test("composeBranchUrl: plain branch passes through", function()
     assert(Updater.composeBranchUrl("master") == BASE .. "master")

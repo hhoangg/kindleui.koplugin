@@ -4626,8 +4626,8 @@ function Settings:_about()
     -- https:// prefix for compactness; the bare host+path reads as a
     -- URL on its own. Full URL with scheme is what Device:openLink and
     -- the clipboard receive on tap.
-    local GITHUB_URL_DISPLAY = "github.com/AndyHazz/bookshelf.koplugin"
-    local GITHUB_URL         = "https://github.com/AndyHazz/bookshelf.koplugin"
+    local GITHUB_URL_DISPLAY = "github.com/hhoangg/kindleui.koplugin"
+    local GITHUB_URL         = "https://github.com/hhoangg/kindleui.koplugin"
 
     local Device           = require("device")
     local Screen           = Device.screen

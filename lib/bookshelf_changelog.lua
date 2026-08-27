@@ -95,7 +95,7 @@ function M.fetch(cb)
         UIManager:scheduleIn(0.1, function()
             local Updater = require("lib/bookshelf_updater")
             local releases = require("lib/bookshelf_http").getJSON(
-                "https://api.github.com/repos/AndyHazz/bookshelf.koplugin/releases",
+                "https://api.github.com/repos/hhoangg/kindleui.koplugin/releases",
                 {
                     user_agent = "KOReader-Bookshelf/" .. Updater.getInstalledVersion(),
                     accept     = "application/vnd.github.v3+json",
