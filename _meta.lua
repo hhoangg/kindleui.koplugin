@@ -15,8 +15,13 @@ return {
     -- disabled. (Disabling works regardless, because an ENABLED plugin loads
     -- main.lua, which does carry name = "bookshelf".) name in _meta restores the
     -- correct key for the disabled-load path; tests/_test_meta.lua guards it.
-    name = "bookshelf",
-    fullname = _("Bookshelf"),
-    description = _([[A nice-looking home screen for KOReader: pick a book from your shelf and read it.]]),
+    -- Renamed from "bookshelf" with the fork: this must equal the .koplugin
+    -- directory id, which is now "kindleui". The long note above is upstream's
+    -- and still applies -- it is why this field is here at all.
+    name = "kindleui",
+    fullname = _("Kindle UI"),
+    description = _([[Kindle's interface for KOReader: a home screen you pick a book from, a control centre from the top edge, a reading toolbar, a page browser, a settings page and a lock screen.
+
+Forked from bookshelf.koplugin by AndyHazz, which is the home screen and the larger part of this.]]),
     version = "4.3.5",
 }

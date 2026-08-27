@@ -234,6 +234,33 @@ function Bookshelf:init()
     -- Register "Open Bookshelf" in the main menu (works in both FM and Reader).
     self.ui.menu:registerToMainMenu(self)
 
+    -- Bring up the Kindle chrome: control centre, reading toolbar, page
+    -- browser, settings page, lock screen.
+    --
+    -- Registered as a sibling module rather than started from here, because it
+    -- needs what every module gets and this plugin cannot forward: the event
+    -- stream. Touch zones, suspend and resume, document open and close all
+    -- arrive by being IN the ui, not by being called from something that is.
+    --
+    -- It is a separate object on purpose. Everything it owns is drawn over the
+    -- reader, and everything this file owns is the home screen; keeping them
+    -- apart means a fault in one is not a home screen that will not open.
+    -- pcall for the same reason: no chrome is a plain KOReader reader, which is
+    -- usable. A raise here is a plugin that does not load at all.
+    local kui_ok, KindleUI = pcall(require, "kindleui_main")
+    if kui_ok and type(KindleUI) == "table" and self.ui and self.ui.registerModule then
+        local built, kui = pcall(function()
+            return KindleUI:new{ ui = self.ui }
+        end)
+        if built and kui then
+            self.ui:registerModule("kindleui", kui)
+        else
+            logger.warn("kindleui: chrome failed to start:", tostring(kui))
+        end
+    elseif not kui_ok then
+        logger.warn("kindleui: chrome failed to load:", tostring(KindleUI))
+    end
+
     -- In reader context, swap the file-browser menu-tab callback for our
     -- fast-path version so the user gets the same raise-to-top + toast UX
     -- as the gesture path. No-op when self.ui.menu hasn't built its
