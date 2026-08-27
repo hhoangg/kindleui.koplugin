@@ -175,6 +175,37 @@ when the network next comes up — `_onNetworkConnected` drains the queue. Pairs
 well with **Network → Restore Wi-Fi connection on resume**, which brings the
 radio back silently so you are usually online by the time you open a book.
 
+## Coming from a Kindle
+
+`tools/kindle-migrate.py` moves a Kindle library across: the books, the
+collections they were filed under, and roughly where you were in each one.
+
+```sh
+python3 tools/kindle-migrate.py --mount /Volumes/Kindle --out ~/kindle-library --dry-run
+python3 tools/kindle-migrate.py --mount /Volumes/Kindle --out ~/kindle-library --cc-db ./cc.db
+```
+
+Needs [calibre](https://calibre-ebook.com) for `ebook-convert`, plus its **KFX
+Input** plugin if any of your books are KFX. Nothing else — no account, no
+network.
+
+Three things worth knowing before you run it:
+
+- **The collections and your reading positions are not on the USB volume.**
+  They live in `/var/local/cc.db` inside the Kindle's own filesystem, which
+  mass storage does not expose. On a jailbroken device: `scp
+  root@<kindle-ip>:/var/local/cc.db ./cc.db`, then pass `--cc-db ./cc.db`.
+  Without it you still get the books, and lose most of the point.
+- **DRM'd books are skipped and named.** They can only be read on the Kindle
+  that bought them; this does not strip DRM and would not be able to.
+- **Positions are a percentage, not a place.** The Kindle stores no exact
+  position anything else can read, so a migrated book opens in about the right
+  chapter rather than on the right line. KOReader replaces the percentage with
+  a real position the first time it saves the book.
+
+It never writes to the Kindle. Everything lands under `--out`, and copying it
+onto the device is a separate step you take yourself — with KOReader closed.
+
 ## Optional companions
 
 None of these are required; each degrades to "that feature is absent".
