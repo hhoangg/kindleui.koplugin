@@ -23,7 +23,13 @@ local t = helpers.runner()
 t.test("first load seeds defaults and sets seeded flag", function()
     kv = {}
     local items = Model.load()
-    assert(#items == 8, "expected starter set, got " .. #items)
+    -- 7, not upstream's 8: this fork drops the "Reading calendar" entry, which
+    -- dispatched KOReader's own stats_calendar_view rather than anything
+    -- bookshelf owned. See the note in bookshelf_start_menu_model.lua.
+    assert(#items == 7, "expected starter set, got " .. #items)
+    for _i, it in ipairs(items) do
+        assert(it.id ~= "sm_cal", "the Reading calendar entry must not be seeded")
+    end
     assert(kv.start_menu_seeded == true, "seeded flag not set")
     assert(type(kv.start_menu_items) == "table", "items not persisted")
 end)

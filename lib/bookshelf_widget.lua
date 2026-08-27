@@ -27,6 +27,7 @@ local Screen          = Device.screen
 local _           = require("lib/bookshelf_i18n").gettext
 
 local Repo        = require("lib/bookshelf_book_repository")
+local Placeholders = require("lib/bookshelf_placeholders")
 local Filter      = require("lib/bookshelf_filter")
 local HeroCard    = require("lib/bookshelf_hero_card")
 local ChipBar   = require("lib/bookshelf_chip_bar")
@@ -3384,6 +3385,64 @@ end
 -- after_open_callback (optional) is handed to ReaderUI:showReader and runs
 -- with the ready ReaderUI once the document is open — same hook the bookmark
 -- browser's "View in book" uses to jump to a position after opening.
+-- _fetchPlaceholder(book, after_open_callback)
+--
+-- Tap on a book the account holds but this device does not. Asks the sync
+-- plugin to fetch it, then opens the real file it landed at.
+--
+-- The plugin owns the download because it owns the account, the transport and
+-- the credentials; this only knows that a tap means "get this". With no opener
+-- registered the tap says so and stops, rather than appearing to do nothing --
+-- a placeholder that swallows taps silently is indistinguishable from a broken
+-- shelf.
+function BookshelfWidget:_fetchPlaceholder(book, after_open_callback)
+    local InfoMessage = require("ui/widget/infomessage")
+    if not Placeholders.hasOpener() then
+        UIManager:show(InfoMessage:new{
+            text    = _("This book is on your account but not on this device, and nothing here can fetch it."),
+            timeout = 4,
+        })
+        return
+    end
+
+    -- Held open until the callback fires. The download is a network round trip
+    -- on a device whose Wi-Fi may still be coming up, so it is not instant and
+    -- an un-acknowledged tap reads as a dead tile.
+    local progress = InfoMessage:new{
+        text = T(_("Downloading %1…"), book.title or book.filename or "?"),
+    }
+    UIManager:show(progress)
+
+    Placeholders.fetch(book, function(real_path, err)
+        UIManager:close(progress)
+        if not real_path then
+            UIManager:show(InfoMessage:new{
+                text    = err and T(_("Could not download this book: %1"), tostring(err))
+                              or _("Could not download this book."),
+                timeout = 5,
+            })
+            return
+        end
+        -- The walk cache still holds the shape list that had this book as a
+        -- placeholder, and the light-meta cache never had a row for a file that
+        -- was not here. Without both invalidations the newly downloaded book
+        -- keeps rendering as a dashed card until the TTL lapses.
+        Repo.invalidateWalkCache()
+        Repo.invalidateAllCache()
+        Repo.invalidateLightMeta()
+        -- Rebuild BEFORE opening. ReaderUI takes over the screen, and the shelf
+        -- underneath is what the reader comes back to -- if it still shows a
+        -- placeholder for the book they just read, the close looks like the
+        -- download was undone.
+        local ok_rb = pcall(function() self:_rebuild() end)
+        if not ok_rb then
+            logger.warn("[bookshelf] rebuild after placeholder download failed")
+        end
+        local fresh = Repo.buildBook(real_path) or { filepath = real_path }
+        self:_openBook(fresh, after_open_callback)
+    end)
+end
+
 function BookshelfWidget:_openBook(book, after_open_callback)
     if not book or not book.filepath then return end
     -- OPDS records carry an "OPDS://server/id" pseudo-path, not a file: there
@@ -3394,6 +3453,14 @@ function BookshelfWidget:_openBook(book, after_open_callback)
     -- record (flags stripped) is caught too.
     if self:_isRemoteRecord(book) then
         self:_showRemoteBookInfo(book)
+        return
+    end
+    -- A book the account holds that this device has not downloaded. Same
+    -- situation as the OPDS branch above -- a record with no file behind it --
+    -- but the resolution differs: OPDS asks the reader which format they want,
+    -- whereas the sync plugin already knows, so a tap just fetches it.
+    if book.is_placeholder then
+        self:_fetchPlaceholder(book, after_open_callback)
         return
     end
     -- Stale records (Send-to-Kindle moved/removed the file after BIM cached
@@ -5143,9 +5210,26 @@ end
 -- setting: "left" (default; an absent or unknown value reads as left),
 -- "right", or "off".
 function BookshelfWidget:_startMenuPosition()
-    local v = BookshelfSettings.read("start_menu_position", "left")
-    if v == "right" or v == "off" then return v end
-    return "left"
+    -- Always "off" in this fork, and the setting is deliberately not read.
+    --
+    -- Upstream's start menu is a footer hamburger opening a panel of Wi-Fi,
+    -- night mode, sleep, exit, settings and a reading calendar. Every one of
+    -- those already has a place in the Kindle chrome this fork wraps around
+    -- bookshelf -- the control centre from the top edge owns the toggles, the
+    -- settings page owns the settings -- so keeping it meant two doors to the
+    -- same rooms, one of them competing with the chrome for the same corner.
+    --
+    -- The reading calendar was not bookshelf's to begin with: that entry
+    -- dispatched KOReader's own `stats_calendar_view` action, which still
+    -- exists and is still reachable from KOReader's menu for anyone who wants
+    -- it. Nothing was deleted from the statistics plugin here.
+    --
+    -- Written as a function rather than deleting the callers because "off" is
+    -- a state upstream already supports at every one of them: the footer skips
+    -- the hamburger, the D-pad skips its focus stop, and _openStartMenu returns
+    -- early. Forcing the value reuses all of that instead of unpicking it, and
+    -- keeps future merges from upstream mergeable.
+    return "off"
 end
 
 -- _buildFooterRow(content_w, total_pages, footer_h) — the screen-anchored
@@ -5219,25 +5303,16 @@ function BookshelfWidget:_buildFooterRow(content_w, total_pages, footer_h)
                 burger,
             }
         end
-        -- Footer micro-module button (full-screen surface on): a grid icon in
-        -- the corner OPPOSITE the start menu so they don't collide; tap opens the
-        -- full-screen grid. start_menu "off" -> default the grid to the right.
-        if BookshelfSettings.microFullscreenButton() then
-            local grid_side = (menu_pos == "left") and "right"
-                or ((menu_pos == "right") and "left" or "right")
-            local nav_strip_w  = math.floor(content_w * 0.75)
-            local side_strip_w = math.floor((self.width - nav_strip_w) / 2)
-            local mm_focused   = (self._focus_zone == "footer")
-                and (self._footer_cursor_btn == "micromod")
-            local mm_icon      = self:_buildMicroModuleIcon(mm_focused, side_strip_w)
-            local MMContainer  = grid_side == "right" and RightContainer or LeftContainer
-            row[#row + 1] = MMContainer:new{
-                dimen = Geom:new{ w = self.width, h = footer_h },
-                mm_icon,
-            }
-        else
-            self._micromod_dimen = nil
-        end
+        -- Upstream draws a micro-module grid icon in the footer corner
+        -- opposite the start menu, opening a full-screen panel of modules.
+        -- Removed in this fork: its panel duplicates surfaces the Kindle
+        -- chrome already owns -- the clock belongs to the lock screen and the
+        -- reading figures to Reading Insights -- and a second tappable corner
+        -- competed with the chrome's own edge gestures.
+        --
+        -- The stashed dimen is still cleared, because the D-pad focus code
+        -- reads it to decide whether the corner is reachable.
+        self._micromod_dimen = nil
     end
     self._footer_h_last = footer_h
     self._footer_row_widget = row
@@ -7898,8 +7973,11 @@ end
 -- "micromod" (the full-screen grid button) sits in the corner OPPOSITE the
 -- start menu, so it caps the order on the far side from "menu" (and, when the
 -- menu is "off", on the right via the LEFT table the off case falls back to).
-local _FOOTER_ORDER_LEFT  = {"menu","first","prev","page","next","last","micromod"}
-local _FOOTER_ORDER_RIGHT = {"micromod","first","prev","page","next","last","menu"}
+-- "micromod" is absent from both: this fork does not draw the footer's
+-- micro-module corner, and leaving it in the order gives the D-pad a stop on
+-- an icon that is not painted -- a focus ring around nothing.
+local _FOOTER_ORDER_LEFT  = {"menu","first","prev","page","next","last"}
+local _FOOTER_ORDER_RIGHT = {"first","prev","page","next","last","menu"}
 local function _footerBtnEnabled(k, page, total, sel_active, menu_pos)
     if k == "menu" then return not sel_active and menu_pos ~= "off" end
     if k == "micromod" then

@@ -32,8 +32,12 @@ end
 function M.DEFAULTS()
     return {
         { id = "sm_quote",    type = "module", module = "quote_of_day" },
-        { id = "sm_cal",      type = "action", label = _("Reading calendar"),
-          icon = "\xEF\x81\xB3", action = { stats_calendar_view = true } }, -- U+F073 fa-calendar
+        -- Upstream's "Reading calendar" entry is removed in this fork. It
+        -- dispatched KOReader's own `stats_calendar_view`, which belongs to the
+        -- statistics plugin and is untouched -- it stays reachable from
+        -- KOReader's menu. Dropped here because this fork ships alongside
+        -- Reading Insights, which covers the same ground in more detail, and
+        -- two calendars a tap apart is a choice nobody wants to make.
         { id = "sm_wifi",     type = "action", label = _("Toggle Wi-Fi"),
           icon = "\xEE\xB2\xA8", action = { toggle_wifi = true } },      -- U+ECA8 wifi
         { id = "sm_night",    type = "action", label = _("Toggle night mode"),
