@@ -406,6 +406,16 @@ local function groupSpecs()
                 "filebrowser_settings", "filemanager_display_mode", "show_filter",
                 "sort_by", "start_with", "history", "favorites", "collections",
                 "bookmark_browser", "document/*",
+                -- bookshelf.koplugin registers a whole TAB of its own
+                -- (`menu_items.bookshelf_tab`), and a tab is not something this
+                -- page can show. Without naming its entries here they were
+                -- reachable only from KOReader's own menu, so a reader who used
+                -- this page as their settings screen simply could not find how
+                -- to configure their home screen. `collect` skips a ref it
+                -- cannot resolve, so these cost nothing when the plugin is
+                -- absent.
+                "bookshelf_settings", "bookshelf_shelf_size", "bookshelf_shelf_tabs",
+                "bookshelf_hardcover", "bookshelf_updates", "bookshelf_about",
             },
         },
         {
