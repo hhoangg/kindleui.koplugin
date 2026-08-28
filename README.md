@@ -13,6 +13,16 @@ If you want the home screen on its own, install
 [bookshelf.koplugin](https://github.com/AndyHazz/bookshelf.koplugin) instead — it is the same code
 without the Kindle chrome, and it is maintained by the person who wrote it.
 
+## What it looks like
+
+Taken on the device it is built for — a Paperwhite 5, 1236×1648.
+
+| Home screen | Control centre |
+| --- | --- |
+| ![The home screen: a hero card for the book in progress, the HOME / RECENT / SERIES / FAVOURITES tabs, and a grid of folder cards with cover art](screenshots/home-screen.png) | ![The control centre pulled down over the home screen: Wi-Fi, Dark Mode, Lock Screen, Sync and All Settings as circular toggles, above brightness and warmth sliders](screenshots/control-centre.png) |
+| **Settings** | **Reading toolbar** |
+| ![The settings page: a flat list of rows, each with an icon and a summary of what is inside, with a search button in the header](screenshots/settings.png) | ![A book open with the reading toolbar across the top and the chapter title, position, time left and a chapter-ticked scrubber across the bottom](screenshots/reading-toolbar.png) |
+
 **Licence: AGPL-3.0**, inherited from bookshelf and unchanged. See [LICENSE](./LICENSE).
 
 ---
@@ -84,10 +94,11 @@ Settings live under **Menu → Taps and gestures → Kindle-style UI**.
 ## Screens
 
 **Control centre** (`kindleui_controlcentre.lua`) — battery, clock,
-four circular toggles in one row, brightness and warmth sliders. Labels read
+five circular toggles in one row, brightness and warmth sliders. Labels read
 the *state* for toggles (`On`/`Off`) and the *name* for actions.
 
-**Wi-Fi, Dark Mode, Sync, All Settings** — and the list is short on purpose.
+**Wi-Fi, Dark Mode, Lock Screen, Sync, All Settings** — and the list is short on
+purpose.
 Kindle's own panel carries Airplane and Bluetooth as well, and neither survives
 contact with KOReader. There is no Bluetooth API at all: not one reference in
 `frontend/` or `plugins/`, on any platform, so the disc could only ever have

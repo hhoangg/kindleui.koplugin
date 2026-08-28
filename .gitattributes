@@ -3,6 +3,8 @@
 tests/          export-ignore
 tools/          export-ignore
 docs/           export-ignore
+# README images. They belong on GitHub, not in every device's plugin folder.
+screenshots/    export-ignore
 .github/        export-ignore
 *.pot           export-ignore
 .gitattributes  export-ignore
