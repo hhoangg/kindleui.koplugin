@@ -247,6 +247,9 @@ return {
     kindleui                                     = "\u{F108}",
     kindleui_lock_screen                         = "\u{F023}",
     kindleui_restart                             = "\u{F021}",
+    -- The same glyph for both, by the repeats rule above: hiding KOReader's menu
+    -- at the top edge and its settings grid at the bottom is one idea seen twice.
+    kindleui_suppress_config                     = "\u{F070}",
     kindleui_suppress_menu                       = "\u{F070}",
     reading_insights_popup                       = "\u{F080}",
     xtreader                                     = "\u{F0C2}",

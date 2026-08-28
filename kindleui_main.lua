@@ -395,6 +395,52 @@ function KindleUI:setupTouchZones()
                                   screen_zone = bot_ext, overrides = BOTTOM_OVERRIDES,
                                   handler = northHandler }
         end
+
+        -- Stop the bottom edge from opening KOReader's ConfigDialog.
+        --
+        -- The swipe was claimed above; the TAP was not, and ReaderConfig binds
+        -- both to the same panel (readerconfig.lua:48-71 -> onTapShowConfigMenu).
+        -- So the bottom edge answered a swipe with the Kindle toolbar and a tap
+        -- with the stock two-panel grid -- one edge, two different settings
+        -- screens, which is the one thing an edge gesture must not do.
+        --
+        -- REPLACED BY ID, not displaced by `overrides`. Overriding only reorders:
+        -- our zone would be tried first and, since it declines, ReaderConfig's
+        -- would still run right after it (inputcontainer.lua:260-264, which walks
+        -- on whenever a handler returns false). Re-registering the SAME id wipes
+        -- the node and installs our handler in its place
+        -- (inputcontainer.lua:139-146), which is the trick _suppressStockMenuTap
+        -- already uses on the home screen. It works here on `ui` because
+        -- ReaderConfig registers on `self.ui` too (readerconfig.lua:47), so both
+        -- land in one DepGraph.
+        --
+        -- DECLINES rather than swallows, so the tap falls through to
+        -- `tap_forward`/`tap_backward` and the bottom of the page turns the page,
+        -- which is what a Kindle does with it.
+        --
+        -- Safe against ReaderConfig putting its own handler back:
+        -- ReaderConfig:onSetDimensions re-runs init (readerconfig.lua:163-166),
+        -- but plugins are registered after it (readerui.lua:464-474) so our
+        -- onSetDimensions -> setupTouchZones is the one that runs last.
+        --
+        -- The setting is read INSIDE the handler rather than around the
+        -- registration, and that is not a style choice. Skipping the
+        -- registration would not hand the zone back: our node is already in the
+        -- graph under ReaderConfig's id, and not re-registering leaves it there
+        -- with the old declining handler, so the bottom edge would go dead
+        -- instead of going back to stock. Owning the id permanently and
+        -- delegating when the setting is off is the only version of this that
+        -- can actually be turned off.
+        local function configTap()
+            if self:isEnabled("suppress_stock_config", true) then return false end
+            local config = self.ui and self.ui.config
+            if not (config and config.onTapShowConfigMenu) then return false end
+            return config:onTapShowConfigMenu()
+        end
+        zones[#zones + 1] = { id = "readerconfigmenu_tap", ges = "tap",
+                              screen_zone = bot, handler = configTap }
+        zones[#zones + 1] = { id = "readerconfigmenu_ext_tap", ges = "tap",
+                              screen_zone = bot_ext, handler = configTap }
     end
 
     if #zones > 0 then
@@ -934,6 +980,20 @@ function KindleUI:addToMainMenu(menu_items)
                     -- change does not rebuild, so they are re-registered here
                     -- or the toggle would mean nothing until the next launch.
                     self:setupTouchZones()
+                end,
+            },
+            {
+                text = _("Bottom edge does not open KOReader's settings"),
+                id = "kindleui_suppress_config",
+                help_text = _("While reading, a tap near the bottom edge opens KOReader's own grid of reading settings. This turns that off, so the bottom edge belongs to the book: a tap turns the page and a swipe up brings the toolbar, where Aa holds the same settings in Kindle's layout.\n\nThe tap is declined rather than swallowed, so the page turn underneath still answers it."),
+                checked_func = function() return self:isEnabled("suppress_stock_config", true) end,
+                callback = function()
+                    G_reader_settings:saveSetting("kindleui_suppress_stock_config",
+                        not self:isEnabled("suppress_stock_config", true))
+                    -- No re-registration needed: the zone is ours either way and
+                    -- reads this setting when the finger lands. Kept as a plain
+                    -- write so the toggle takes effect on the very next tap,
+                    -- with no reader rebuild.
                 end,
                 separator = true,
             },
