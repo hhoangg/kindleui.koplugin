@@ -123,8 +123,19 @@ local REF_PICK_INFO_H   = 62  -- the page strip under the rows
 local REF_PICK_INFO_T_H = 32
 
 -- The sheet's share of the screen, measured off a PW5 screenshot: the page keeps
--- roughly its top 40%.
-local SHEET_RATIO = 0.60
+-- roughly its top third.
+--
+-- This has to be at least as tall as the TALLEST tab needs, not as tall as the
+-- design drawing. The band is a fixed fraction, so a tab that overflows it makes
+-- `update` grow the sheet for that tab alone -- and then the sheet is a different
+-- height on different tabs, which is both wrong to look at and the thing that
+-- used to leave a stale rule behind on the way back down (see AaMenu:refresh).
+--
+-- 0.60 gave the body 768px. Layout -- line spacing and margins are sliders, and
+-- sliders are tall -- needs 811px, measured off the device's own warning. 0.65
+-- gives it 851px, so every tab fits inside one band and no tab grows it. Adding
+-- a row to a tab means re-checking that: the warning in `update` is what says so.
+local SHEET_RATIO = 0.65
 
 -- Chips are only legible while the run stays short; anything longer becomes a
 -- Stepper instead, which shows one choice at a time.
@@ -1707,6 +1718,23 @@ function AaMenu:_buildFontTab()
     local weight = self:_choiceRow("font_base_weight", _("Weight"))
     if weight then table.insert(rows, weight) end
 
+    -- Kindle offers bold on or off. crengine offers a gamma curve, and on e-ink
+    -- that is the better control: it thickens the strokes of the face already
+    -- chosen instead of swapping in a second one, which is what a reader on a
+    -- washed-out panel actually wants. Eight values (creoptions.lua:577), so
+    -- _choiceRow renders it as a Stepper -- the same shape Weight above already
+    -- takes for its seven.
+    --
+    -- Its `labels` are numbers rather than strings (creoptions.lua:580), which is
+    -- fine: TextWidget coerces with tostring (textwidget.lua:118-119).
+    --
+    -- The koptinterface formats have no font gamma. Their nearest equivalent is
+    -- image contrast for a scanned page (koptoptions.lua:489) -- the same
+    -- question asked of a different kind of page.
+    local contrast = self:_choiceRow("font_gamma", _("Contrast"))
+                     or self:_choiceRow("contrast", _("Contrast"))
+    if contrast then table.insert(rows, contrast) end
+
     local gap = self:_choiceRow("word_spacing", _("Word gap"))
     if gap then table.insert(rows, gap) end
 
@@ -1814,6 +1842,18 @@ function AaMenu:_buildLayoutTab()
     local align = self:_alignmentRow() or self:_choiceRow("justification", _("Alignment"))
     if align then table.insert(rows, align) end
 
+    -- Page or continuous scroll -- the one option in KOReader's grid that changes
+    -- how the book is READ rather than how it looks, and the only reason left to
+    -- go back to that grid now that the bottom edge no longer opens it.
+    --
+    -- crengine calls it view_mode (creoptions.lua:305) and the koptinterface
+    -- formats page_scroll (koptoptions.lua:343). Both are a two-value toggle
+    -- carrying their own event, so _choiceRow takes either without special
+    -- casing.
+    local mode = self:_choiceRow("view_mode", _("Page mode"))
+                 or self:_choiceRow("page_scroll", _("Page mode"))
+    if mode then table.insert(rows, mode) end
+
     local anim = self:_pageAnimationRow()
     if anim then table.insert(rows, anim) end
 
@@ -1827,6 +1867,30 @@ end
 -- The full-refresh choices KOReader itself offers, with the values it sends.
 -- refresh_menu_table.lua:57-105; -1 means "every chapter".
 local REFRESH_VALUES = { 0, 1, 6, -1 }
+
+--- Whether an option's own `enabled_func` says it can act right now.
+--
+-- ConfigDialog greys such an option out. This sheet has no greyed state, so a
+-- row that cannot act is left out instead -- which is what it already does for
+-- an option missing from the loaded table, and better than a control that
+-- accepts a tap and changes nothing.
+--
+-- Called at the row rather than inside _choiceRow, and that restraint is
+-- deliberate. The koptinterface table also puts enabled_func on line_spacing,
+-- justification, font_size and word_spacing (koptoptions.lua:383, 404, 433, 465),
+-- all four of which this sheet shows today for a PDF. Making the check general
+-- would quietly empty a PDF's Font and Layout tabs whenever reflow is off. That
+-- may well be the right answer, but it is a separate change to a separate
+-- format and not one to smuggle in here.
+local function optionEnabled(option, configurable, document)
+    if type(option.enabled_func) ~= "function" then return true end
+    -- pcall because the predicate is upstream's and reaches into the document:
+    -- one that throws must cost us nothing worse than a row ConfigDialog would
+    -- have shown anyway, merely greyed.
+    local ok, enabled = pcall(option.enabled_func, configurable, document)
+    if not ok then return true end
+    return enabled ~= false
+end
 
 function AaMenu:_buildMoreTab()
     local rows = {}
@@ -1866,6 +1930,27 @@ function AaMenu:_buildMoreTab()
 
     local images = self:_choiceRow("nightmode_images", _("Invert images"))
     if images then table.insert(rows, images) end
+
+    -- Publisher style, and the fonts that come with it. Kindle has neither, and
+    -- they are the pair that decides whether the Typeface, Margins and Line
+    -- spacing chosen on the other tabs are honoured at all: a book whose own CSS
+    -- names a family and a leading overrides them silently, and until now there
+    -- was no way to say no to that from inside kindleui.
+    local css = self:_choiceRow("embedded_css", _("Publisher style"))
+    if css then table.insert(rows, css) end
+
+    -- embedded_fonts means something only while embedded_css is on AND the book
+    -- actually carries fonts (creoptions.lua:701-704) -- publisher fonts arrive
+    -- through publisher CSS, so with that off the question is moot.
+    --
+    -- Left out rather than shown dead. The row comes straight back when the one
+    -- above is switched: _commitLater refreshes the sheet after every commit
+    -- (kindleui_aamenu.lua:1207-1212), so it reappears on the same tap.
+    local fonts_opt = self.opt_by_name["embedded_fonts"]
+    if fonts_opt and optionEnabled(fonts_opt, self.configurable, self.document) then
+        local fonts = self:_choiceRow("embedded_fonts", _("Publisher fonts"))
+        if fonts then table.insert(rows, fonts) end
+    end
 
     return rows
 end
@@ -2162,8 +2247,31 @@ function AaMenu:update()
 end
 
 --- Rebuild and repaint the sheet alone.
+--
+-- WHY THE OLD RECT IS REPAINTED TOO, AND WHY BY `nil`
+--
+-- The sheet is not always the same height. `update` grows the band when a tab's
+-- content will not fit, and a tab can change height under its own feet -- More
+-- drops the publisher-fonts row when publisher style is switched off. So a
+-- refresh can leave the sheet SHORTER than it was a moment ago.
+--
+-- Repainting only the new rect strands the strip the old one covered. What was
+-- there was the taller sheet's top rule, and it stayed on the page as a second
+-- rule floating above the real one, with fragments of the row that had been
+-- beside it. Reported from the device, and visible in a screenshot as two rules
+-- where the design has one.
+--
+-- `nil` and not `self`: only the widgets UNDER us can repaint a strip we no
+-- longer cover. Handing setDirty `self` marks the sheet dirty, and the sheet
+-- does not reach up there any more, so nothing would be drawn over the stale
+-- pixels. That is the same reasoning as onCloseWidget below -- the other place
+-- this widget stops covering something it used to.
 function AaMenu:refresh()
+    local was = self.dimen and self.dimen:copy()
     self:update()
+    if was and self.dimen and was.h > self.dimen.h then
+        UIManager:setDirty(nil, "ui", was)
+    end
     UIManager:setDirty(self, "ui", self.dimen)
 end
 
