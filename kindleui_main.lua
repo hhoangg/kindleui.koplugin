@@ -337,7 +337,9 @@ function KindleUI:setupTouchZones()
 
     local zones = {}
 
-    if self:isEnabled("control_centre", true) then
+    -- Unconditional. This band was behind a setting; it is not any more,
+    -- because with it off the top edge of the screen does nothing at all.
+    do
         local cc_zones, top, top_ext = self:_controlCentreZones("kindleui_", TOP_OVERRIDES)
         for _, zone in ipairs(cc_zones) do
             zones[#zones + 1] = zone
@@ -354,8 +356,9 @@ function KindleUI:setupTouchZones()
         self._home_zones = self:_controlCentreZones("kindleui_home_", nil)
 
         -- Reader only: the toolbar is about the open book, so in the file
-        -- manager a top-edge tap keeps its stock meaning.
-        if ui.document and self:isEnabled("toolbar", true) then
+        -- manager a top-edge tap keeps its stock meaning. Reader-or-not is the
+        -- only condition left; the switch that also guarded this is gone.
+        if ui.document then
             local function tapHandler()
                 return self:onShowKindleToolbar()
             end
@@ -368,8 +371,9 @@ function KindleUI:setupTouchZones()
         end
     end
 
-    -- Reader only: the page browser needs a document to page through.
-    if ui.document and self:isEnabled("page_browser", true) then
+    -- Reader only: the page browser needs a document to page through. As with
+    -- the toolbar, that is now the only thing gating it.
+    if ui.document then
         local bot = zoneRatio("DTAP_ZONE_CONFIG",
                               { ratio_x = 0, ratio_y = 7/8, ratio_w = 1, ratio_h = 1/8 })
         local bot_ext = zoneRatio("DTAP_ZONE_CONFIG_EXT",
@@ -907,46 +911,17 @@ function KindleUI:addToMainMenu(menu_items)
         -- minutes and left him unable to repeat the route.
         sorting_hint = "taps_and_gestures",
         sub_item_table = {
-            {
-                text = _("Swipe down opens the control centre"),
-                -- `id` so the settings page can give this row an icon; it
-                -- keys on ids, never on titles.
-                id = "kindleui_swipe_down",
-                help_text = _("Without this, swiping down from the top opens KOReader's two stock panels at once: the top menu and the bottom style strip."),
-                checked_func = function() return self:isEnabled("control_centre", true) end,
-                callback = function()
-                    G_reader_settings:saveSetting("kindleui_control_centre",
-                        not self:isEnabled("control_centre", true))
-                    self:setupTouchZones()
-                end,
-            },
-            {
-                text = _("Swipe up opens Go to"),
-                -- `id` so the settings page can give this row an icon; it
-                -- keys on ids, never on titles.
-                id = "kindleui_swipe_up",
-                help_text = _("Replaces the bottom style strip with the chapter list."),
-                checked_func = function() return self:isEnabled("page_browser", true) end,
-                callback = function()
-                    G_reader_settings:saveSetting("kindleui_page_browser",
-                        not self:isEnabled("page_browser", true))
-                    self:setupTouchZones()
-                end,
-            },
-            {
-                text = _("Tap the top edge opens the reading toolbar"),
-                -- `id` so the settings page can give this row an icon; it
-                -- keys on ids, never on titles.
-                id = "kindleui_tap_top",
-                help_text = _("Kindle splits the surface three ways: the device belongs to the swipe-down panel, the book to this toolbar, and your position in it to the swipe-up panel."),
-                checked_func = function() return self:isEnabled("toolbar", true) end,
-                callback = function()
-                    G_reader_settings:saveSetting("kindleui_toolbar",
-                        not self:isEnabled("toolbar", true))
-                    self:setupTouchZones()
-                end,
-                separator = true,
-            },
+            -- The three gestures this fork is built on -- swipe down for the
+            -- control centre, swipe up for Go to, tap the top for the reading
+            -- toolbar -- used to be three switches here. They are not switches
+            -- any more.
+            --
+            -- Turning one off did not return the reader to stock KOReader; it
+            -- returned them to a Kindle with a third of its surface dead,
+            -- because everything those gestures reach is only reachable that
+            -- way. A setting whose off state is a broken device is not a
+            -- choice, it is a trap, so the gestures are now simply part of
+            -- what installing this fork means.
             {
                 text = _("Top edge does not open KOReader's menu"),
                 id = "kindleui_suppress_menu",
@@ -969,14 +944,6 @@ function KindleUI:addToMainMenu(menu_items)
                 id = "kindleui_lock_screen",
                 separator = true,
                 sub_item_table_func = function() return self:lockScreenMenu() end,
-            },
-            {
-                text = _("Show control centre now"),
-                -- `id` so the settings page can give this row an icon; it
-                -- keys on ids, never on titles.
-                id = "kindleui_show_cc",
-                keep_menu_open = false,
-                callback = function() self:onShowKindleControlCentre() end,
             },
             {
                 text = _("Restart KOReader"),

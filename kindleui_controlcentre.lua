@@ -18,10 +18,8 @@ north.
     │ Kindle Paperwhite            82 % [batt] │
     │ 04:32 PM • Aug 25, 2026                  │
     │                                          │
-    │      (✈)        (BT)        (◐)          │
-    │       On         Off     Dark Mode       │
-    │             (↻)        (⚙)               │
-    │            Sync    All Settings          │
+    │(≋)   (◐)        (⚿)     (↻)      (⚙)     │
+    │On Dark Mode Lock Screen Sync All Settings│
     │ ──────────────────────────────────────── │
     │ Brightness                               │
     │ −  ━━━━━━(O)──────────────────────  +    │
@@ -74,6 +72,7 @@ trusting a cheat sheet:
     U+E7DC  brightness-4    (glyph name "brightness-4", a moon in a circle)
     U+F013  cog             (glyph name "cog")
     U+F021  refresh         (glyph name "refresh", the two chasing arrows)
+    U+F023  lock            (FontAwesome block; the closed padlock)
     U+F240  battery-full    (FontAwesome block)
     U+F077  chevron up      (glyph name "chevron_up")
 
@@ -85,6 +84,7 @@ are used instead.
 ]]
 local GLYPH_WIFI      = "\u{F1EB}"
 local GLYPH_DARKMODE  = "\u{E7DC}"
+local GLYPH_LOCK      = "\u{F023}"
 local GLYPH_SYNC      = "\u{F021}"
 local GLYPH_SETTINGS  = "\u{F013}"
 local GLYPH_BATTERY   = "\u{F240}"
@@ -437,8 +437,8 @@ function ControlCentre:_discRow(specs, cell_w)
 end
 
 function ControlCentre:_buildToggles()
-    -- Four discs in one row, so a quarter of the inner width each.
-    local cell_w = math.floor(self.inner_w / 4)
+    -- Five discs in one row, so a fifth of the inner width each.
+    local cell_w = math.floor(self.inner_w / 5)
 
     -- Wi-Fi, stated plainly.
     --
@@ -479,6 +479,57 @@ function ControlCentre:_buildToggles()
                 -- common_settings_menu_table.lua:270.
                 self:_dispatch(Event:new("ToggleNightMode"))
                 self:rebuild()
+            end,
+        },
+        {
+            glyph = GLYPH_LOCK,
+            label = _("Lock Screen"),
+            -- An action, not a state: there is no "unlocked" to sit in, so the
+            -- disc stays hollow like Sync rather than filling like Dark Mode.
+            active = false,
+            -- generic/device.lua:133 says no and kindle/device.lua:402 says
+            -- yes, so this is grey and inert on a device that cannot sleep --
+            -- the same treatment Wi-Fi gets without a radio toggle.
+            disabled = not Device:canSuspend(),
+            on_tap = function()
+                -- Deliberately NOT self:_dispatch, and this is the one action
+                -- on the panel that cannot use it.
+                --
+                -- _dispatch tries `ui:handleEvent` and falls back to
+                -- `UIManager:sendEvent` whenever that does not return true.
+                -- DeviceListener:onRequestSuspend returns NOTHING
+                -- (devicelistener.lua:454-456), so handled and unhandled look
+                -- identical from the outside and the fallback always runs --
+                -- the event goes out twice, every time.
+                --
+                -- For every other action here that is harmless, because the
+                -- panel is still the topmost widget and sendEvent only reaches
+                -- the topmost one (uimanager.lua:915). The second copy lands
+                -- on the panel, which handles none of these, and dies there.
+                -- Dark Mode survives the same double dispatch for exactly that
+                -- reason.
+                --
+                -- This action closes the panel, so that shield is gone and the
+                -- second copy reaches ReaderUI. And Kindle's suspend is not a
+                -- command, it is a TOGGLE: powerd:toggleSuspend presses the
+                -- virtual power button (kindle/powerd.lua:242-248). Two presses
+                -- is sleep followed immediately by wake, which is what the
+                -- device did.
+                --
+                -- One route, chosen before the event is sent, is the only shape
+                -- of this that cannot fire twice.
+                local event = Event:new("RequestSuspend")
+                if self.ui and self.ui.handleEvent then
+                    self.ui:handleEvent(event)
+                else
+                    UIManager:sendEvent(event)
+                end
+                -- Closed after the dispatch, which is safe because
+                -- UIManager:suspend only schedules the real work on nextTick
+                -- (uimanager.lua:1611). The panel is gone before the device
+                -- sleeps, so the reader does not wake to a control centre it
+                -- never asked to reopen.
+                UIManager:close(self)
             end,
         },
         {

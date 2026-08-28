@@ -37,5 +37,5 @@ Forked from bookshelf.koplugin by AndyHazz, which is the home screen and the lar
     -- has to sit above, or beside, or below. The upstream release a build is
     -- made from is recorded in the release notes, which is where a human looks
     -- for it, rather than smuggled into a field only a comparator reads.
-    version = "0.1.0",
+    version = "0.1.1",
 }
